@@ -70,7 +70,6 @@ class FundPerformanceCalculator:
         except Exception:
             nombre = ''
 
-        # Función para crear el slug
         def slugify(text):
             text = text.lower()
             text = re.sub(r'[^\w\s-]', '', text)
@@ -84,124 +83,10 @@ class FundPerformanceCalculator:
 
         print(f"  • Consultando Finect para {isin}: {url}")
 
-        # Check cache first
         if isin in self.finect_cache:
             return self.finect_cache[isin]
-        
-        try:
-            # Hacer petición
-            response = requests.get(url, headers=self.headers, timeout=10)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                fund_info = {
-                    'categoria': 'No disponible',
-                    'subcategoria': 'No disponible',
-                    'comision_gestion': 'No disponible',
-                    'comision_depositario': 'No disponible',
-                    'gastos_corrientes': 'No disponible',
-                    'patrimonio': 'No disponible',
-                    'gestora': 'No disponible',
-                    'moneda': 'No disponible',
-                    'encontrado_finect': True
-                }
-                
-                # Extraer categoría (buscar en diferentes posibles ubicaciones)
-                category_selectors = [
-                    'span[data-testid="category"]',
-                    '.category-text',
-                    'div:contains("Categoría")',
-                    'td:contains("Categoría")'
-                ]
-                
-                for selector in category_selectors:
-                    try:
-                        category_elem = soup.select_one(selector)
-                        if category_elem:
-                            fund_info['categoria'] = category_elem.get_text(strip=True)
-                            break
-                    except:
-                        continue
-                
-                # Extraer comisiones y gastos
-                commission_patterns = [
-                    ('comision_gestion', ['Comisión de gestión', 'Gestión']),
-                    ('comision_depositario', ['Comisión de depositario', 'Depositario']),
-                    ('gastos_corrientes', ['Gastos corrientes', 'TER', 'Ratio de gastos'])
-                ]
-                
-                for field, patterns in commission_patterns:
-                    for pattern in patterns:
-                        try:
-                            # Buscar en tablas
-                            rows = soup.find_all('tr')
-                            for row in rows:
-                                if pattern.lower() in row.get_text().lower():
-                                    cells = row.find_all(['td', 'th'])
-                                    if len(cells) >= 2:
-                                        value = cells[-1].get_text(strip=True)
-                                        if '%' in value or '€' in value:
-                                            fund_info[field] = value
-                                            break
-                            
-                            # Buscar en divs con texto
-                            for div in soup.find_all('div'):
-                                text = div.get_text()
-                                if pattern.lower() in text.lower():
-                                    # Buscar porcentajes en el texto
-                                    percent_match = re.search(r'(\d+[.,]\d+)%', text)
-                                    if percent_match:
-                                        fund_info[field] = percent_match.group(1).replace(',', '.') + '%'
-                                        break
-                        except:
-                            continue
-                
-                # Extraer patrimonio
-                try:
-                    # Buscar patrimonio en millones
-                    for elem in soup.find_all(text=re.compile(r'(\d+[.,]\d*)\s*(millones|M€|mill)')):
-                        match = re.search(r'(\d+[.,]\d*)\s*(millones|M€|mill)', elem)
-                        if match:
-                            value = match.group(1).replace(',', '.')
-                            fund_info['patrimonio'] = f"{value} M€"
-                            break
-                except:
-                    pass
-                
-                # Extraer gestora
-                try:
-                    gestora_selectors = [
-                        'span[data-testid="management-company"]',
-                        '.management-company',
-                        'div:contains("Gestora")'
-                    ]
-                    
-                    for selector in gestora_selectors:
-                        gestora_elem = soup.select_one(selector)
-                        if gestora_elem:
-                            fund_info['gestora'] = gestora_elem.get_text(strip=True)
-                            break
-                except:
-                    pass
-                
-                # Clasificar tipo de fondo basado en categoría
-                fund_info['tipo'] = self.classify_fund_from_category(fund_info['categoria'])
-                
-                print(f"    ✓ Información obtenida de Finect: {fund_info['categoria']}")
-                
-                # Cache result
-                self.finect_cache[isin] = fund_info
-                return fund_info
-                
-            else:
-                print(f"    ❌ Error al acceder a Finect: {response.status_code}")
-                
-        except Exception as e:
-            print(f"    ❌ Error consultando Finect: {str(e)}")
-        
-        # Return default info if failed
-        default_info = {
+
+        fund_info = {
             'categoria': 'No disponible',
             'subcategoria': 'No disponible',
             'comision_gestion': 'No disponible',
@@ -213,10 +98,72 @@ class FundPerformanceCalculator:
             'tipo': 'No disponible',
             'encontrado_finect': False
         }
-        
-        self.finect_cache[isin] = default_info
-        return default_info
-    
+
+        try:
+            response = requests.get(url, headers=self.headers, timeout=10)
+            if response.status_code != 200:
+                print(f"    ❌ Error al acceder a Finect: {response.status_code}")
+                self.finect_cache[isin] = fund_info
+                return fund_info
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            text = soup.get_text(separator='\n')
+
+            # Extraer categoría Morningstar/Finect (ejemplo: "Categoría: RV Zona Euro Cap. Grande")
+            cat_match = re.search(r'Categoría\s*:\s*([^\n]+)', text)
+            if not cat_match:
+                # Alternativa: buscar "Categoría" en una línea y tomar la siguiente
+                lines = text.split('\n')
+                for i, line in enumerate(lines):
+                    if "Categoría" in line and i+1 < len(lines):
+                        possible_cat = lines[i+1].strip()
+                        if possible_cat:
+                            fund_info['categoria'] = possible_cat
+                            break
+            else:
+                fund_info['categoria'] = cat_match.group(1).strip()
+
+            # Extraer gestora (ejemplo: "Gestora: BBVA Asset Management SA SGIIC")
+            gestora_match = re.search(r'Gestora\s*:\s*([^\n]+)', text)
+            if gestora_match:
+                fund_info['gestora'] = gestora_match.group(1).strip()
+            else:
+                # Alternativa: buscar "Gestora" en una línea y tomar la siguiente
+                for i, line in enumerate(lines):
+                    if "Gestora" in line and i+1 < len(lines):
+                        possible_gestora = lines[i+1].strip()
+                        if possible_gestora:
+                            fund_info['gestora'] = possible_gestora
+                            break
+
+            # Extraer comisiones y gastos
+            gestion = re.search(r'Comisión de gestión[^\d]*(\d+[.,]\d+ ?%)', text)
+            depositario = re.search(r'Comisión de (depositario|custodia)[^\d]*(\d+[.,]\d+ ?%)', text)
+            gastos = re.search(r'Gastos corrientes[^\d]*(\d+[.,]\d+ ?%)', text)
+            patrimonio = re.search(r'Patrimonio[^\d]*(\d+[.,]\d+ ?M[€]?)', text)
+
+            if gestion:
+                fund_info['comision_gestion'] = gestion.group(1).replace(',', '.').replace(' ', '')
+            if depositario:
+                fund_info['comision_depositario'] = depositario.group(2).replace(',', '.').replace(' ', '')
+            if gastos:
+                fund_info['gastos_corrientes'] = gastos.group(1).replace(',', '.').replace(' ', '')
+            if patrimonio:
+                fund_info['patrimonio'] = patrimonio.group(1).replace(',', '.').replace(' ', '')
+
+            # Clasificar tipo de fondo basado en categoría
+            fund_info['tipo'] = self.classify_fund_from_category(fund_info['categoria'])
+
+            fund_info['encontrado_finect'] = True
+            print(f"    ✓ Información obtenida de Finect: {fund_info['categoria']}")
+            self.finect_cache[isin] = fund_info
+            return fund_info
+
+        except Exception as e:
+            print(f"    ❌ Error consultando Finect: {str(e)}")
+            self.finect_cache[isin] = fund_info
+            return fund_info
+
     def classify_fund_from_category(self, category: str) -> str:
         """
         Clasifica el fondo basado en la categoría Morningstar/Finect
