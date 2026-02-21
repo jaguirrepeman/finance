@@ -85,7 +85,10 @@ class Portfolio:
         # Get complete portfolio data
         self.portfolio_df = self._get_portfolio_data()
         
-        return self.portfolio_df
+        # Prevent double printing by tracking initialization
+        if hasattr(self, '_initialized') and self._initialized:
+            return self.portfolio_df
+        self._initialized = True
     
     def _process_single_fund(self, fund_name: str, isin: str, investment: float, weight: float, movements: pd.DataFrame) -> dict:
         """

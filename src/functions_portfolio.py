@@ -12,6 +12,67 @@ import warnings
 warnings.filterwarnings('ignore')
 from functions_fund import Fund
 
+def compare_portfolios(portfolio1, portfolio2, names=("Cartera 1", "Cartera 2"), years=3):
+    """
+    Compara dos carteras y devuelve un DataFrame con tres filas:
+    - Agregado del primero
+    - Agregado del segundo
+    - Diferencia (segundo - primero) en columnas numéricas
+    """
+    import pandas as pd
+    def get_summary(port):
+        # Si es Portfolio, asegurarse de que las rentabilidades están calculadas
+        if hasattr(port, "summarize_portfolio"):
+            if hasattr(port, "portfolio_df") and (
+                "rentabilidad_total" not in port.portfolio_df.columns or port.portfolio_df["rentabilidad_total"].isnull().all()
+            ):
+                port._initialize_portfolio()
+            return port.summarize_portfolio(show_all=False)
+        elif isinstance(port, pd.DataFrame):
+            return port.copy()
+        elif isinstance(port, dict):
+            return pd.DataFrame(port)
+        else:
+            raise ValueError("Formato de portfolio no soportado")
+    # Obtener agregados
+    agg1 = get_summary(portfolio1)
+    agg2 = get_summary(portfolio2)
+    # Mantener solo la primera fila si hay varias
+    if len(agg1) > 1:
+        agg1 = agg1.iloc[[0]]
+    if len(agg2) > 1:
+        agg2 = agg2.iloc[[0]]
+    # Asegurar que las columnas son iguales y únicas
+    common_cols = list(dict.fromkeys(list(agg1.columns) + list(agg2.columns)))
+    agg1 = agg1.reindex(columns=common_cols)
+    agg2 = agg2.reindex(columns=common_cols)
+    # Detectar columnas donde ambos portfolios son NA o están en blanco
+    def is_na_or_blank(s):
+        return s.isna() | (s.astype(str).str.strip() == "")
+    mask1 = is_na_or_blank(agg1.iloc[0])
+    mask2 = is_na_or_blank(agg2.iloc[0])
+    drop_cols = [col for col in common_cols if mask1[col] and mask2[col]]
+    # Calcular diferencia solo en columnas numéricas
+    numeric_cols = [c for c in common_cols if pd.api.types.is_numeric_dtype(agg1[c]) and c in agg2.columns]
+    diff_row = agg2[numeric_cols].values[0] - agg1[numeric_cols].values[0]
+    diff_df = pd.DataFrame([diff_row], columns=numeric_cols)
+    # Para columnas no numéricas, dejar en blanco
+    for col in common_cols:
+        if col not in numeric_cols:
+            diff_df[col] = ""
+    # Reordenar columnas igual que los agregados
+    diff_df = diff_df[common_cols]
+    # Asignar nombres de fila
+    agg1.index = [names[0]]
+    agg2.index = [names[1]]
+    diff_df.index = ["Diferencia"]
+    # Concatenar y eliminar columnas NA/blanco en ambos
+    result = pd.concat([agg1, agg2, diff_df], axis=0)
+    result = result.drop(columns=drop_cols)
+    result = result.reset_index().rename(columns={"index": "Portfolio"})
+    return result
+
+# Método de conveniencia en Portfolio
 class Portfolio:
     def __init__(self, portfolio_df, default_years=3, use_cache=True):
         """
@@ -52,6 +113,9 @@ class Portfolio:
         )
         # Recopilar datos completos
         self.portfolio_df = self._get_portfolio_data()
+        # Eliminar columna duplicada 'isin' si existe junto con 'ISIN'
+        if 'ISIN' in self.portfolio_df.columns and 'isin' in self.portfolio_df.columns:
+            self.portfolio_df = self.portfolio_df.drop(columns=['isin'])
         return self.portfolio_df
 
     def _get_portfolio_data(self) -> pd.DataFrame:
@@ -70,9 +134,11 @@ class Portfolio:
             fecha = row['Fecha']
             # Procesar fondo (solo una vez por ISIN)
             if isin not in self.funds:
+                # Solo inicializar el objeto Fund, no llamar a _process_fund explícitamente
                 self.funds[isin] = Fund(isin=isin, name=fund_name, use_cache=self.use_cache)
             fund_obj = self.funds[isin]
-            fund_data = fund_obj._process_fund()
+            # Usar el atributo fund_data si ya está inicializado, si no llamar a _process_fund
+            fund_data = fund_obj.fund_data if fund_obj.fund_data is not None else fund_obj._process_fund()
             historical_data = fund_data.get('historical_data', None)[0]
             fund_data_df = fund_data.get('data', pd.DataFrame())[0]
             # Convertir todos los valores Series de fund_data_df a escalares
@@ -253,129 +319,18 @@ class Portfolio:
             'movements': movement_results
         }
         
-    def compare_portfolios(self, portfolio1, portfolio2, 
-                        names=('Cartera 1', 'Cartera 2'), years=3):
+    def compare_to(self, other, names=("Cartera 1", "Cartera 2"), years=None):
         """
-        Compara dos carteras de fondos diferentes.
-        
+        Compara este portfolio con otro (Portfolio, DataFrame, o dict).
         Args:
-            portfolio1: Primera cartera a comparar (DataFrame o dict)
-                        Incluye columnas 'Nombre', 'ISIN', 'Inversion' y opcionalmente 'Fecha'
-            portfolio2: Segunda cartera a comparar (DataFrame o dict)
-                        Incluye columnas 'Nombre', 'ISIN', 'Inversion' y opcionalmente 'Fecha'
+            other: Portfolio, DataFrame, o dict
             names: Nombres para identificar cada cartera
-            years: Número de años para el análisis histórico cuando no hay fechas específicas
-        
+            years: Número de años para el análisis histórico
         Returns:
             dict: Resultados de la comparación
         """
-        if years is not None:
-            self.default_years = years
-            
-        # Convertir diccionarios a DataFrames
-        portfolio1 = pd.DataFrame(portfolio1) if isinstance(portfolio1, dict) else portfolio1
-        portfolio2 = pd.DataFrame(portfolio2) if isinstance(portfolio2, dict) else portfolio2
+        return compare_portfolios(self, other, names=names, years=years or self.default_years)
         
-        # Añadir fecha por defecto si no existe
-        if 'Fecha' not in portfolio1.columns:
-            portfolio1 = portfolio1.copy()
-            default_date = (datetime.now() - timedelta(days=self.default_years*365)).strftime('%Y-%m-%d')
-            portfolio1['Fecha'] = default_date
-            
-        if 'Fecha' not in portfolio2.columns:
-            portfolio2 = portfolio2.copy()
-            default_date = (datetime.now() - timedelta(days=self.default_years*365)).strftime('%Y-%m-%d')
-            portfolio2['Fecha'] = default_date
-        
-        # Crear instancias temporales de Portfolio para cada cartera
-        # Esto evita conflictos con los datos de la instancia actual
-        original_portfolio_df = self.portfolio_df
-        original_funds = self.funds
-        
-        # Analizar cada cartera por separado
-        self.portfolio_df = None  # Reset para forzar inicialización
-        self.funds = {}
-        results1 = self.analyze_portfolio_returns(portfolio_df=portfolio1)
-        
-        self.portfolio_df = None  # Reset para forzar inicialización
-        self.funds = {}
-        results2 = self.analyze_portfolio_returns(portfolio_df=portfolio2)
-        
-        # Restaurar los datos originales de la instancia
-        self.portfolio_df = original_portfolio_df
-        self.funds = original_funds
-        
-        # Preparar resultados de la comparación
-        comparison = {
-            'portfolios': {
-                names[0]: results1,
-                names[1]: results2
-            },
-            'differences': {},
-            'figures': {}
-        }
-        
-        # Calcular diferencias clave
-        if ('portfolio_summary' in results1 and 'portfolio_summary' in results2 and
-            'total_return' in results1['portfolio_summary'] and 'total_return' in results2['portfolio_summary']):
-            diff_return = (results2['portfolio_summary']['total_return'] - 
-                        results1['portfolio_summary']['total_return'])
-            comparison['differences']['total_return'] = diff_return
-        
-        # Comparar rentabilidades por periodo
-        period_returns = {}
-        for period in ['1y', '3y', '5y', 'annual']:
-            if (period in results1.get('portfolio_summary', {}).get('weighted_returns', {}) and 
-                period in results2.get('portfolio_summary', {}).get('weighted_returns', {})):
-                
-                period_returns[period] = (results2['portfolio_summary']['weighted_returns'][period] - 
-                                        results1['portfolio_summary']['weighted_returns'][period])
-        
-        comparison['differences']['period_returns'] = period_returns
-        
-        # Visualizar la comparación
-        try:
-            periods = list(period_returns.keys())
-            values = [period_returns[p] for p in periods]
-            
-            plt.figure(figsize=(10, 6))
-            bars = plt.bar(periods, values, color=['green' if v >= 0 else 'red' for v in values])
-            plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-            plt.title(f'Diferencia de Rentabilidad: {names[1]} vs {names[0]}', fontsize=15)
-            plt.ylabel('Diferencia (%)')
-            
-            # Añadir valores en las barras
-            for bar in bars:
-                height = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2., 
-                        height + 0.1 if height >= 0 else height - 0.6,
-                        f'{height:.2f}%', 
-                        ha='center', va='bottom' if height >= 0 else 'top')
-            
-            plt.tight_layout()
-            comparison['figures']['returns_diff'] = plt.gcf()
-            
-            print(f"\n📊 COMPARACIÓN DE RENTABILIDADES")
-            print("=" * 50)
-            
-            if 'total_return' in comparison['differences']:
-                diff_return = comparison['differences']['total_return']
-                print(f"Diferencia en rentabilidad total: {diff_return:.2f}%")
-                
-                for period, diff in period_returns.items():
-                    print(f"Diferencia en rentabilidad a {period}: {diff:.2f}%")
-                    
-                winner = names[1] if diff_return > 0 else names[0]
-                print(f"\nResumen: {winner} tiene un mejor rendimiento general" if diff_return != 0 else 
-                    "\nResumen: Ambas carteras tienen rendimientos similares")
-            else:
-                print("No hay suficientes datos para comparar las rentabilidades.")
-            
-        except Exception as e:
-            print(f"⚠️ Error al visualizar la comparación: {str(e)}")
-        
-        return comparison
-
     def analyze_portfolio(self, years=None):
         """
         Realiza un análisis completo de la cartera (rentabilidades y composición).
@@ -1338,3 +1293,51 @@ class Portfolio:
         )
         
         return fig
+
+    def summarize_portfolio(self, show_all=False):
+        """
+        Aggregates all fund rows into a single total row, weighted by current value (valor_actual).
+        If show_all=True, returns all funds plus the total row.
+        Output format and column order are preserved.
+        """
+        df = self.portfolio_df.copy()
+        # Standardize column names to title case
+        df.columns = [str(c) for c in df.columns]
+        # Ensure 'Valor_Actual' exists
+        if 'valor_actual' not in df.columns:
+            raise KeyError("No se encontró columna 'valor_actual' para calcular pesos actuales.")
+        total_valor_actual = df['valor_actual'].sum()
+        # Peso_Actual: weight by current value
+        df['Peso_Actual'] = df['valor_actual'] / total_valor_actual if total_valor_actual else 0
+        # Select numeric columns for aggregation
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        # Always include 'Peso_Actual' in numeric_cols for weighting
+        if 'Peso_Actual' not in numeric_cols:
+            numeric_cols.append('Peso_Actual')
+        # Columns to sum directly (not weighted)
+        sum_cols = ['valor_actual', 'Inversion', 'Peso']
+        # Aggregate using weighted mean for numeric columns (except sum_cols and Peso_Actual itself)
+        total_row = {}
+        for col in numeric_cols:
+            if col == 'Peso_Actual':
+                total_row[col] = 1.0
+            elif col in sum_cols:
+                total_row[col] = df[col].sum()
+            else:
+                # Weighted mean
+                total_row[col] = (df[col] * df['Peso_Actual']).sum()
+        # Add identifiers
+        total_row['Isin'] = 'TOTAL'
+        total_row['Nombre'] = 'TOTAL'
+        # Add any non-numeric columns as blank or default
+        for col in df.columns:
+            if col not in total_row:
+                total_row[col] = ''
+        # Preserve column order
+        total_df = pd.DataFrame([total_row], columns=df.columns)
+        if show_all:
+            # Return all funds plus total row
+            return pd.concat([df, total_df], ignore_index=True)
+        else:
+            # Return only the total row
+            return total_df

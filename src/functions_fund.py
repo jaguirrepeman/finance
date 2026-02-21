@@ -384,11 +384,10 @@ class Fund:
             # Allocation weighting
             try:
                 alloc_weights_df = pd.DataFrame(funds.allocationWeighting(), index=[0])\
-                    .add_prefix("perc_alloc_")
-                if 'portfolioDate' in alloc_weights_df.columns:
-                    alloc_weights_df = alloc_weights_df.drop(["portfolioDate"], axis=1)
-                if 'masterPortfolioId' in alloc_weights_df.columns:
-                    alloc_weights_df = alloc_weights_df.drop(["masterPortfolioId"], axis=1)
+                    .drop(["masterPortfolioId"], axis=1)\
+                    .add_prefix("perc_alloc_")\
+                    .rename(columns = {"perc_alloc_portfolioDate": "portfolioDate"})\
+                    .apply(lambda x: x.astype(float) if "perc_alloc" in x.name else x)
                 dataframes.append(alloc_weights_df)
             except Exception as e:
                 print(f"  ❌ Error obteniendo allocationWeighting: {str(e)}")
@@ -459,7 +458,7 @@ class Fund:
                             index=None, 
                             columns='holdingType', 
                             values='weighting')
-                        .add_prefix('perc_')
+                        .add_prefix('perc_holding_')
                 )
                 dataframes.append(rf_rv)
             except Exception as e:
@@ -476,7 +475,9 @@ class Fund:
             
             # Risk score
             try:
-                risk_df = pd.DataFrame(funds.riskScore())[['riskScore', 'riskLevel']].head(1)
+                risk_df = pd.DataFrame(funds.riskScore())\
+                    [['riskScore', 'riskLevel']].head(1)\
+                    .assign(riskScore = lambda x: x.riskScore.astype(int))
                 dataframes.append(risk_df)
             except Exception as e:
                 print(f"  ❌ Error obteniendo riskScore: {str(e)}")
@@ -494,9 +495,9 @@ class Fund:
                 for d in dataframes:
                     d.index = [0]
                 result_df = pd.concat(dataframes, axis=1)
-                result_df.fillna({"perc_Bond": 0, 
-                                "perc_Equity": 0,
-                                "perc_Other": 0}, inplace=True)
+                result_df.fillna({"perc_Fija": 0, 
+                                "perc_Variable": 0,
+                                "perc_Otros": 0}, inplace=True)
                 print(f"✓ Datos completos recopilados para {isin}")
                 
                 # Cache the data before returning
