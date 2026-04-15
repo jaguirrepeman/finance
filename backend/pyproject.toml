@@ -1,0 +1,22 @@
+[tool.poetry]
+package-mode = false
+name = "portfolio-tracker-api"
+version = "0.1.0"
+description = "FastAPI backend for Portfolio Tracker Dashboard"
+authors = ["Admin <admin@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "*"
+uvicorn = {extras = ["standard"], version = "*"}
+pandas = ">=2.0.0"
+mstarpy = ">=9.0.2"
+playwright = "*"
+curl-cffi = "^0.14.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
