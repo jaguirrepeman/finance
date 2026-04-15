@@ -1,3 +1,5 @@
 backend/data/*.json
 backend/data/*.db
 __pycache__
+data/
+src/__pycache__/
