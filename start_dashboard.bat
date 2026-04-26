@@ -9,7 +9,7 @@ call poetry install
 
 echo.
 echo Levantando el Motor de Datos (FastAPI)...
-start cmd /k "poetry run uvicorn app.main:app --host 127.0.0.1 --port 8000"
+start cmd /k "poetry run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
 
 echo.
 echo Esperando a que el servidor despierte...

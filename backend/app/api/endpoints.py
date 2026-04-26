@@ -1,170 +1,118 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+import os
+import json
 from typing import List
-from ..schemas.portfolio import AnalysisResponse, PortfolioSummary, FundBase
-from ..services.portfolio import analyze_portfolio_logic, get_portfolio_data, save_portfolio
-from ..services.finect_analyzer import scrape_finect, sync_playwright
-from ..services.morningstar_analyzer import analyze_morningstar
-import concurrent.futures
-import datetime
-import time
-import pandas as pd
-import mstarpy
+from ..schemas.portfolio import AnalysisResponse, FundBase
+from ..services.portfolio import get_portfolio_data, save_portfolio
+from ..services.background_calculator import CACHE_DIR, run_analytics_pipeline
 
 router = APIRouter()
 
+def get_cache(filename, default=None):
+    path = os.path.join(CACHE_DIR, filename)
+    if not os.path.exists(path):
+        return default
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+# Las funciones antiguas (_map_category, _get_mapped_data, safe_float) ya no son necesarias aquí, 
+# han sido migradas al background_calculator, pero mantenemos safe_float por si acaso.
+import math
+import pandas as pd
+def safe_float(val):
+    if pd.isna(val) or val is None: return 0.0
+    try:
+        val_float = float(val)
+        if math.isnan(val_float) or math.isinf(val_float):
+            return 0.0
+        return val_float
+    except (ValueError, TypeError):
+        return 0.0
+
+def _map_category(tipo):
+    t = str(tipo).upper()
+    if t in ['INDEX', 'VALUE', 'SPECIALIZED']:
+        return 'Renta Variable'
+    elif t == 'RF':
+        return 'Renta Fija'
+    elif t == 'CASH':
+        return 'Liquidez'
+    return 'Otros'
+
+def _get_mapped_data(data):
+    mapped_data = []
+    for f in data:
+        isin = f.get("ISIN")
+        if not isin:
+            isin = f"MANUAL-{f.get('Fondo', 'Desconocido')}"
+        mapped_data.append({
+            "Nombre": f["Fondo"],
+            "ISIN": isin,
+            "Inversion": float(f.get("Porcentaje", 10)),
+            "Fecha": "2020-01-01",
+            "categoria": _map_category(f.get("TIPO", "INDEX"))
+        })
+    return mapped_data
+
 @router.get("/summary", response_model=AnalysisResponse)
 async def get_portfolio_summary():
-    # Llama a la lógica separada del portfolio
+    cached = get_cache('summary.json')
+    if cached:
+        return cached
+        
     data = get_portfolio_data()
-    summary, recommendation = analyze_portfolio_logic(data)
-    
-    # Envolvemos funds en la respuesta (usando los datos básicos para la vista rápida)
-    return {
-        "summary": summary,
-        "funds": data,
-        "recommendation": recommendation
-    }
-
-import time
+    return {"summary": {"total_rv":0.0, "total_rf":0.0, "total_cash":0.0, "total_alt":0.0, "details":{}}, "funds": data, "recommendation": {"rf_sug": {"title": "Sin Datos Cacheables", "text": "Pulsa en Recalcular Morningstar para generar el caché base."}}}
 
 @router.get("/enrich", response_model=AnalysisResponse)
-async def get_enriched_portfolio():
-    # Ejecutamos Morningstar de forma **SECUENCIAL** con pausas
-    # Morningstar bloquea las peticiones (403) si se hacen muchas a la vez (ThreadPool).
-    import copy
+async def get_enriched_portfolio(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_analytics_pipeline, force_download=True)
+    
+    # Devolveremos la ultima caché pero marcando que se está calculando
+    cached = get_cache('summary.json')
     data = get_portfolio_data()
-    enriched_data = copy.deepcopy(data)
-    
-    print("📡 Refrescando datos en tiempo real (Protección anti-bot activada)...")
-    for fund in enriched_data:
-        if fund.get("ISIN"):
-            data_ms = analyze_morningstar(fund["ISIN"])
-            fund.update(data_ms)
-            time.sleep(1) # Pausa obligatoria de 1 segundo entre fondos para evitar baneo
+    if not cached:
+        cached = {"summary": {"total_rv":0.0, "total_rf":0.0, "total_cash":0.0, "total_alt":0.0, "details":{}}, "funds": data, "recommendation": {}}
         
-    summary, recommendation = analyze_portfolio_logic(enriched_data)
-    
-    return {
-        "summary": summary,
-        "funds": enriched_data,
-        "recommendation": recommendation
+    cached["recommendation"] = {
+        "rf_sug": {"title": "Cálculo en Proceso (Background)", "text": "El motor de datos web está ejecutándose en paralelo. Refresca la ventana en unos segundos."}
     }
-
-@router.get("/history/{isin}")
-async def get_fund_history(isin: str):
-    """Obtiene el histórico completo de NAVs para un ISIN dado."""
-    try:
-        fund = mstarpy.Funds(term=isin)
-        start_d = datetime.date(2010, 1, 1) # Máximo histórico
-        end_d = datetime.date.today()
-        nav_data = fund.nav(start_date=start_d, end_date=end_d)
-        
-        if not nav_data:
-            return []
-            
-        # Filtramos para enviar un payload ligero (1 dato por semana o reducir tamaño si es gigante)
-        # Para ser fieles al historial completo, enviamos todo pero optimizado:
-        return [{"date": str(x["date"])[:10], "price": float(x["nav"])} for x in nav_data]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return cached
 
 @router.get("/history_batch")
 async def get_history_batch():
-    """Obtiene el histórico completo de TODOS los fondos de la base de datos de una vez."""
-    data = get_portfolio_data()
-    funds = [f for f in data if f.get("ISIN")]
-    results = {}
-    start_d = datetime.date(2000, 1, 1) # Full available history
-    end_d = datetime.date.today()
-    
-    for f in funds:
-        try:
-            fund = mstarpy.Funds(term=f["ISIN"])
-            nav_data = fund.nav(start_date=start_d, end_date=end_d)
-            if nav_data:
-                results[f["Fondo"]] = [{"date": str(x["date"])[:10], "price": float(x["nav"])} for x in nav_data]
-            time.sleep(0.5)
-        except Exception:
-            pass
-    return results
+    return get_cache('history_batch.json', {})
 
 @router.get("/details")
 async def get_portfolio_details():
-    """Descarga e integra sectores y geografías para TODOS los fondos listados en la BB.DD."""
-    data = get_portfolio_data()
-    funds = [f for f in data if f.get("ISIN")]
-    results = {}
-    
-    for f in funds:
-        try:
-            fund = mstarpy.Funds(term=f["ISIN"])
-            # La librería puede fallar si el fondo no reporta estas métricas
-            sect = fund.sector() if hasattr(fund, "sector") else {}
-            reg = fund.regional_exposure() if hasattr(fund, "regional_exposure") else {}
-            
-            # Empaquetamos en formato JSON estructurado y normalizado
-            results[f["Fondo"]] = {
-                "sector": sect,
-                "region": reg,
-                "percentage": f.get("Porcentaje", 0),
-                "tipo": f.get("TIPO", "UNKNOWN")
-            }
-            time.sleep(0.5) # Anti-bot estricto
-        except Exception:
-            pass
-    return results
+    return get_cache('details.json', {})
 
 @router.get("/correlation")
 async def get_portfolio_correlation():
-    """Descarga históricos de TODOS los fondos y calcula matriz de Pearson."""
-    # Obtenemos TODOS los fondos con ISIN válido
-    portfolio = get_portfolio_data()
-    funds_to_analyze = [f for f in portfolio if f.get("ISIN")]
-    
-    history_dfs = []
-    labels = []
-    
-    for f in funds_to_analyze:
-        try:
-            fund = mstarpy.Funds(term=f["ISIN"])
-            data = fund.nav(start_date=datetime.date(2023, 1, 1), end_date=datetime.date.today())
-            if data:
-                dates = [x["date"] for x in data]
-                navs = [float(x["nav"]) for x in data]
-                df = pd.DataFrame({"date": dates, f["Fondo"]: navs}).set_index("date")
-                history_dfs.append(df)
-                labels.append(f["Fondo"])
-                time.sleep(0.5) # Anti-bot estricto
-        except Exception:
-            print(f"Error fetching correlation history for {f['ISIN']}")
-            
-    if not history_dfs:
-        raise HTTPException(status_code=500, detail="Cannot compute correlation due to upstream blocking")
-        
-    merged_df = pd.concat(history_dfs, axis=1).dropna()
-    corr = merged_df.corr().round(2)
-    
-    return {
-        "labels": labels,
-        "matrix": corr.to_dict()
-    }
+    corr = get_cache('correlation.json', {"labels": [], "matrix": {}})
+    if not corr.get("labels"):
+        raise HTTPException(status_code=500, detail="Cannot compute correlation or cache empty")
+    return corr
 
 @router.post("/")
-async def add_fund(fund: FundBase):
-    """Añade un nuevo fondo a la base de datos."""
+async def add_fund(fund: FundBase, background_tasks: BackgroundTasks):
     data = get_portfolio_data()
-    # Pydantic a dict (respetando alias si los hay, pero FundBase usa alias solo en lectura opcional)
     fund_dict = fund.model_dump(by_alias=True, exclude_none=True)
     data.append(fund_dict)
     save_portfolio(data)
-    return {"message": "✅ Fondo añadido correctamente"}
+    
+    # Recalcular caches automáticamente 
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": "✅ Fondo añadido correctamente. Calculando en background..."}
 
 @router.delete("/{isin_or_name}")
-async def delete_fund(isin_or_name: str):
-    """Elimina un fondo de la base de datos local por ISIN o nombre exacto."""
+async def delete_fund(isin_or_name: str, background_tasks: BackgroundTasks):
     data = get_portfolio_data()
     new_data = [f for f in data if f.get("ISIN") != isin_or_name and f.get("Fondo") != isin_or_name]
     if len(data) == len(new_data):
         raise HTTPException(status_code=404, detail="Fondo no encontrado en tu base de datos.")
     save_portfolio(new_data)
-    return {"message": "🗑️ Fondo eliminado de forma segura"}
+    
+    # Recalcular caches automáticamente 
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": "🗑️ Fondo eliminado. Calculando en background..."}
+

@@ -12,7 +12,12 @@ uvicorn = {extras = ["standard"], version = "*"}
 pandas = ">=2.0.0"
 mstarpy = ">=9.0.2"
 playwright = "*"
-curl-cffi = "^0.14.0"
+plotly = "^6.7.0"
+seaborn = "^0.13.2"
+webdriver-manager = "^4.0.2"
+yfinance = "^1.2.2"
+httpx = "^0.28.1"
+openpyxl = "^3.1.5"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"

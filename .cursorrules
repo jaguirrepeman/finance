@@ -1,0 +1,17 @@
+# AI Assistant Guidelines for Portfolio Tracker Project
+
+## Architecture & Code Structure
+1. **Core Data Flow**: The source of truth is `backend/app/services/core_portfolio.py` (which contains the `Portfolio` class). It implements a robust FIFO logic to manage investment lots.
+2. **Fund Analysis**: `backend/app/services/functions_fund.py` provides the `Fund` class to interact with Morningstar and Yahoo Finance. 
+3. **Deprecated Code**: Do **NOT** use anything from `backend/app/services/deprecated/`. Old files like `functions_portfolio.py`, `portfolio.py`, and `myinvestor_parser.py` are explicitly deprecated.
+
+## Python Best Practices
+1. **Typing**: Use standard Python type hinting (`from typing import List, Dict, Optional, Union`, etc.) in all new function definitions and properties.
+2. **Docstrings**: Provide clear Google-style or Sphinx-style docstrings for any new class, method, or function. Document the intent and expected parameters/returns.
+3. **SOLID Principles**: Keep responsibilities segregated. Avoid god-classes or massive inline calculation loops if they can be refactored into descriptive methods (e.g. `Portfolio.to_dataframe()`).
+4. **Error Handling**: Use `logger.warning` or `logger.error` from `logging` instead of naked `print()` statements in production services. Raise specific Exceptions (like `ValueError`, `FileNotFoundError`) when data is unrecoverably invalid.
+5. **Tests**: Use the `pytest` framework to create tests for the `Portfolio` class and its methods. Use the /tests directory and create test files in it. Move the tests to this directory.
+
+## UX / Dashboard
+1. **Frontend Interactions**: Ensure JSON endpoints serialize floats correctly (beware of `NaN` and `Infinity` failing in default `json` module; use custom serializers or robust floats).
+2. **Responses**: Try to keep responses to the frontend as clean DataFrames converted to `dict(orient="records")` or simple objects.

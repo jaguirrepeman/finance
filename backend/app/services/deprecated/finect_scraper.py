@@ -1,3 +1,9 @@
+﻿# DEPRECATED
+# Este archivo ha sido movido a la carpeta 'deprecated/' y ya no se mantiene activamente.
+# Fue reemplazado por la nueva arquitectura basada en core_portfolio.py + functions_fund.py.
+# Se conserva como referencia histórica. NO importar desde código activo.
+# Deprecado el: 2026-04-26
+# ============================================================================
 import time
 import requests
 import json

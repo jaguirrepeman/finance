@@ -16,7 +16,6 @@ import os
 import json
 import mstarpy as ms
 import hashlib
-from finect_scraper import scrape_finect_fund_data
 warnings.filterwarnings('ignore')
 
 
@@ -235,19 +234,20 @@ class CacheManager:
         return count
 
 class Fund:
-    def __init__(self, isin=None, initialize=True, name=None, cache_path=None, use_cache=True):
+    def __init__(self, isin=None, initialize=True, mode="detailed", name=None, cache_path=None, use_cache=True):
         
         self.isin = isin
         self.info = False
         self.name = name
         self.use_cache = use_cache
+        self.mode = mode
         
         # Inicializar el gestor de caché
         self.cache_manager = CacheManager(base_path=cache_path)
         self.fund_data = None
         #TODO Dejamos el name por si se pudiera buscar por nombre en el futuro
         if initialize and isin is not None:
-            self.fund_data = self._process_fund(use_cache=use_cache)
+            self.fund_data = self._process_fund(use_cache=use_cache, mode=self.mode)
 
     #### OBTENER DATOS DE FONDOS ####
     
@@ -512,12 +512,13 @@ class Fund:
             print(f"❌ Error general obteniendo datos para {isin}: {str(e)}")
             return pd.DataFrame([{'isin': isin, 'error': str(e)}])
             
-    def _process_fund(self, use_cache=None) -> pd.DataFrame:
+    def _process_fund(self, use_cache=None, mode="detailed") -> pd.DataFrame:
         """
         Procesa un único fondo y recopila todos sus datos.
         
         Args:
             use_cache: Si es True, intenta recuperar datos de la caché. Si es None, usa el valor de self.use_cache
+            mode: 'light' para solo NAV, 'detailed' para todo.
             
         Returns:
             pd.DataFrame: DataFrame con todos los datos procesados del fondo
@@ -526,61 +527,96 @@ class Fund:
         if use_cache is None:
             use_cache = self.use_cache
             
-        # Crear una clave de caché que incluya la fecha actual
+        # Crear una clave de caché que incluya la fecha actual y el modo
         isin = self.isin
         current_date = datetime.now().strftime('%Y-%m-%d')
-        cache_key = f"{self.isin}_{current_date}"
+        cache_key = f"{self.isin}_{mode}_{current_date}"
         
         # Verificar si ya tenemos los datos procesados en caché si está permitido
         if use_cache:
             cached_data = self.cache_manager.get(cache_key)
             if cached_data is not None:
-                print(f"  ✓ Usando datos en caché para {isin}")
+                print(f"  ✓ Usando datos en caché para {isin} ({mode})")
                 return cached_data
         
-        print(f"\n--- Procesando: {isin}---")
-          # Obtener datos históricos para el rendimiento (primero intentar con Yahoo)
-        yahoo_data = self.get_yahoo_fund_data(use_cache=use_cache)
+        print(f"\n--- Procesando: {isin} ({mode})---")
         
-        # Obtener datos completos de Morningstar
-        print(f"Obteniendo datos completos de Morningstar para {isin}...")
-        ms_data = self.get_morningstar_fund_data(use_cache=use_cache)
-        
-        # Obtener datos de Finect y concatenarlos
-        print(f"Obteniendo datos de Finect para {isin}...")
-        finect_data = scrape_finect_fund_data(isin)
-        if finect_data is not None and not finect_data.empty:
-            # Asegurarse de que los índices estén alineados para la concatenación
-            ms_data.reset_index(drop=True, inplace=True)
-            finect_data.reset_index(drop=True, inplace=True)
-            ms_data = pd.concat([ms_data, finect_data], axis=1)
-            print(f"  ✓ Datos de Finect integrados para {isin}")
-        else:
-            print(f"  - No se encontraron datos en Finect para {isin}")
+        if mode == 'light':
+            # MODO LIGERO: Solo histórico de Yahoo o NAV reciente de Morningstar
+            yahoo_data = self.get_yahoo_fund_data(use_cache=use_cache)
+            if yahoo_data is not None and not yahoo_data.empty:
+                historical_data = yahoo_data
+                precio = yahoo_data['Close'].iloc[-1]
+                nombre = yahoo_data.attrs.get('name', isin)
+            else:
+                try:
+                    funds = ms.Funds(isin)
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=30) # Solo 30 días para ligero
+                    nav_data = funds.nav(start_date, end_date)
+                    nav_data = pd.DataFrame(nav_data).assign(nav=lambda x: x.nav.fillna(x.totalReturn))
+                    
+                    historical_data = pd.DataFrame({
+                        'Date': nav_data['date'],
+                        'Close': nav_data['nav'],
+                        'Open': nav_data['nav'],
+                        'High': nav_data['nav'],
+                        'Low': nav_data['nav'],
+                        'Volume': 0,
+                        'Source': 'Morningstar'
+                    }).set_index('Date')
+                    precio = historical_data['Close'].iloc[-1] if not historical_data.empty else 0.0
+                    nombre = getattr(funds, 'name', isin)
+                except Exception as e:
+                    print(f"  [Error] obteniendo NAV ligero para {isin}: {str(e)}")
+                    historical_data = pd.DataFrame()
+                    precio = 0.0
+                    nombre = isin
 
-        ms_data_dict = ms_data.to_dict('records')[0] if not ms_data.empty else {}
-        
-        
-        # Extraer datos de NAV de Morningstar si existen
-        ms_nav_data = None
-        if 'nav_history' in ms_data_dict and ms_data_dict['nav_history'] is not None:
-            ms_nav_data = ms_data_dict['nav_history']
+            fecha_act = None
+            if not historical_data.empty:
+                last_idx = historical_data.index[-1]
+                fecha_act = last_idx.strftime('%Y-%m-%d') if hasattr(last_idx, 'strftime') else str(last_idx)
+            ms_data = pd.DataFrame([{'precio_actual': precio, 'name': nombre, 'fecha_actualizacion': fecha_act}])
+            
         else:
+            # MODO DETALLE: Toda la información
+            yahoo_data = self.get_yahoo_fund_data(use_cache=use_cache)
+            
+            # Obtener datos completos de Morningstar
+            print(f"Obteniendo datos completos de Morningstar para {isin}...")
+            ms_data = self.get_morningstar_fund_data(use_cache=use_cache)
+            
+            ms_data_dict = ms_data.to_dict('records')[0] if not ms_data.empty else {}
+            
             ms_nav_data = pd.DataFrame()
+            if 'nav_history' in ms_data_dict and ms_data_dict['nav_history'] is not None:
+                ms_nav_data = ms_data_dict['nav_history']
 
-        # Determinar qué fuente de datos usar
-        if len(yahoo_data.index) >= 0.9*ms_nav_data.shape[0]:
-            historical_data = yahoo_data
-            print(f"  ℹ️ Usando datos históricos de Yahoo para {isin}")
-        else:
-            historical_data = ms_nav_data
-            print(f"  ℹ️ Usando datos históricos de Morningstar para {isin}")
+            if yahoo_data is not None and not yahoo_data.empty and (ms_nav_data.empty or len(yahoo_data.index) >= 0.9 * ms_nav_data.shape[0]):
+                historical_data = yahoo_data
+                print(f"  [Info] Usando datos históricos de Yahoo para {isin}")
+            elif not ms_nav_data.empty:
+                historical_data = ms_nav_data
+                print(f"  [Info] Usando datos históricos de Morningstar para {isin}")
+            else:
+                historical_data = pd.DataFrame()
+                print(f"  [Error] No se pudo recuperar ningún histórico válido para {isin}")
+
+            if not ms_data.empty:
+                precio_act = historical_data['Close'].iloc[-1] if not historical_data.empty else 0.0
+                fecha_act = None
+                if not historical_data.empty:
+                    last_idx = historical_data.index[-1]
+                    fecha_act = last_idx.strftime('%Y-%m-%d') if hasattr(last_idx, 'strftime') else str(last_idx)
+                ms_data['precio_actual'] = precio_act
+                ms_data['fecha_actualizacion'] = fecha_act
         
-
         # Preparar datos básicos del fondo como un DataFrame
+        nombre_fondo = ms_data['name'].iloc[0] if 'name' in ms_data.columns and not pd.isna(ms_data['name'].iloc[0]) else isin
         fund_data = pd.DataFrame([{
             'isin': isin,
-            'nombre': ms_data_dict.get('name', isin),
+            'nombre': nombre_fondo,
             'historical_data': historical_data,
             'data': ms_data
         }])
@@ -589,3 +625,43 @@ class Fund:
         self.cache_manager.set(cache_key, fund_data)
         
         return fund_data
+
+def get_morningstar_fund_data(isin: str) -> dict:
+    """
+    Función de compatibilidad para scripts heredados y libretas Jupyter.
+    Envuelve la clase Fund orientada a objetos y devuelve el diccionario clásico.
+    """
+    try:
+        f = Fund(isin=isin, use_cache=True)
+        df = f.fund_data
+        
+        if df is None or df.empty:
+            return {'precio_actual': 0.0, 'name': str(isin)}
+            
+        nombre = df['nombre'].iloc[0] if 'nombre' in df.columns else str(isin)
+        historical = df['historical_data'].iloc[0] if 'historical_data' in df.columns else None
+        ms_data = df['data'].iloc[0] if 'data' in df.columns else None
+        
+        precio_actual = 0.0
+        
+        # 1. Intentar sacar el precio de data (extraído por Finect p. ej)
+        if isinstance(ms_data, pd.DataFrame) and 'precio_actual' in ms_data.columns:
+            val = ms_data['precio_actual'].iloc[0]
+            if pd.notna(val):
+                try: precio_actual = float(val)
+                except ValueError: pass
+                
+        # 2. Si es 0.0, sacar el precio del último cierre histórico
+        if precio_actual == 0.0 and isinstance(historical, pd.DataFrame) and not historical.empty and 'Close' in historical.columns:
+            val = historical['Close'].iloc[-1]
+            if pd.notna(val):
+                try: precio_actual = float(val)
+                except ValueError: pass
+                
+        return {
+            'precio_actual': precio_actual,
+            'name': nombre if pd.notna(nombre) else str(isin)
+        }
+    except Exception as e:
+        print(f"Aviso de compatibilidad: Error procesando {isin} -> {e}")
+        return {'precio_actual': 0.0, 'name': str(isin)}
