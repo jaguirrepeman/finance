@@ -141,6 +141,28 @@ class Portfolio:
             df["Importe"] = df["Importe"].apply(self._clean_float)
 
         df["Fecha"] = pd.to_datetime(df["Fecha"])
+
+        # Estandarizar ISIN para las reglas
+        df_isin = df["ISIN"].astype(str).str.strip().str.upper()
+
+        # Regla 1: Reembolsos específicos que deben tener signo negativo
+        is_ie00 = df_isin == "IE00BYX5MX67"
+        is_feb24 = (df["Fecha"].dt.month == 2) & (df["Fecha"].dt.day == 24)
+        
+        mask1 = is_ie00 & is_feb24 & (((df["Participaciones"].abs() - 70.082).abs() < 0.1) | ((df["Participaciones"].abs() - 70082).abs() < 10))
+        df.loc[mask1, "Participaciones"] = -df.loc[mask1, "Participaciones"].abs()
+
+        mask2 = is_ie00 & is_feb24 & (((df["Participaciones"].abs() - 140.164).abs() < 0.1) | ((df["Participaciones"].abs() - 140164).abs() < 10))
+        df.loc[mask2, "Participaciones"] = -df.loc[mask2, "Participaciones"].abs()
+
+        mask3 = (df_isin == "FR0000989626") & (df["Fecha"].dt.month == 9) & (df["Fecha"].dt.day == 14) & (df["Fecha"].dt.year == 2025)
+        df.loc[mask3, "Participaciones"] = -df.loc[mask3, "Participaciones"].abs()
+
+        # Regla 2: Dividir por 1000 las participaciones de ciertos ISINs
+        isins_to_divide = ["ES0146309002", "FR0000989626", "LU0302296495"]
+        mask_isin = df_isin.isin(isins_to_divide)
+        df.loc[mask_isin, "Participaciones"] = df.loc[mask_isin, "Participaciones"] / 1000.0
+
         df = df.sort_values("Fecha")
 
         for isin, group in df.groupby("ISIN"):
