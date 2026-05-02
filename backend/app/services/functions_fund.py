@@ -325,8 +325,16 @@ class Fund:
         if use_cache:
             cached_data = self.cache_manager.get(cache_key)
             if cached_data is not None:
-                print(f"✓ Usando datos de Morningstar desde caché para {isin}")
-                return cached_data
+                # Validar que no sea un resultado de error cacheado
+                if isinstance(cached_data, pd.DataFrame) and "error" in cached_data.columns:
+                    if cached_data["error"].notna().any():
+                        print(f"⚠️ Cache de Morningstar para {isin} contiene errores, reintentando...")
+                    else:
+                        print(f"✓ Usando datos de Morningstar desde caché para {isin}")
+                        return cached_data
+                else:
+                    print(f"✓ Usando datos de Morningstar desde caché para {isin}")
+                    return cached_data
 
         print(f"Recopilando datos completos para {isin}...")
         
@@ -500,16 +508,22 @@ class Fund:
                                 "perc_Otros": 0}, inplace=True)
                 print(f"✓ Datos completos recopilados para {isin}")
                 
-                # Cache the data before returning
-                self.cache_manager.set(cache_key, result_df)
+                # Solo cachear si hay datos útiles (más que isin + error)
+                has_useful_data = len(result_df.columns) > 3 and "error" not in result_df.columns
+                if has_useful_data:
+                    self.cache_manager.set(cache_key, result_df)
+                else:
+                    print(f"  ⚠️ Datos insuficientes, no se cachean para {isin}")
                 
                 return result_df
             else:
                 print(f"❌ No se pudieron recopilar datos para {isin}")
+                # NO cachear resultados de error
                 return pd.DataFrame([{'isin': isin, 'error': 'No data available'}])
         
         except Exception as e:
             print(f"❌ Error general obteniendo datos para {isin}: {str(e)}")
+            # NO cachear resultados de error
             return pd.DataFrame([{'isin': isin, 'error': str(e)}])
             
     def _process_fund(self, use_cache=None, mode="detailed") -> pd.DataFrame:
@@ -536,8 +550,17 @@ class Fund:
         if use_cache:
             cached_data = self.cache_manager.get(cache_key)
             if cached_data is not None:
-                print(f"  ✓ Usando datos en caché para {isin} ({mode})")
-                return cached_data
+                # Validar que los datos cacheados no contengan errores
+                is_valid = True
+                if isinstance(cached_data, pd.DataFrame) and "data" in cached_data.columns:
+                    data_col = cached_data["data"].iloc[0]
+                    if isinstance(data_col, pd.DataFrame) and "error" in data_col.columns:
+                        if data_col["error"].notna().any():
+                            is_valid = False
+                            print(f"  ⚠️ Cache de {isin} ({mode}) contiene errores, reprocessing...")
+                if is_valid:
+                    print(f"  ✓ Usando datos en caché para {isin} ({mode})")
+                    return cached_data
         
         print(f"\n--- Procesando: {isin} ({mode})---")
         
@@ -621,8 +644,16 @@ class Fund:
             'data': ms_data
         }])
         
-        # Guardar en el cache manager
-        self.cache_manager.set(cache_key, fund_data)
+        # Solo cachear si no hay errores en los datos de Morningstar
+        has_error = (
+            isinstance(ms_data, pd.DataFrame)
+            and "error" in ms_data.columns
+            and ms_data["error"].notna().any()
+        )
+        if has_error:
+            print(f"  ⚠️ Datos con error, no se cachean para {isin} ({mode})")
+        else:
+            self.cache_manager.set(cache_key, fund_data)
         
         return fund_data
 

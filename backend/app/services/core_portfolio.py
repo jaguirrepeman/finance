@@ -51,13 +51,17 @@ class Portfolio:
         """
         self.open_lots: List[Dict] = []
         self.positions: Dict[str, float] = {}
+        self.movements: pd.DataFrame = pd.DataFrame()
 
         if source is None:
             pass  # Portfolio vacío; el llamador puede popularlo manualmente
         elif isinstance(source, str):
-            if not (source.endswith(".xlsx") or source.endswith(".csv")):
-                raise ValueError("Solo se soportan archivos .xlsx o .csv")
-            self._load_from_excel(source)
+            if source.endswith(".tsv"):
+                self._load_from_tsv(source)
+            elif source.endswith(".xlsx") or source.endswith(".csv"):
+                self._load_from_excel(source)
+            else:
+                raise ValueError("Solo se soportan archivos .xlsx, .csv o .tsv")
         elif isinstance(source, list):
             self._load_from_list(source)
         elif isinstance(source, dict):
@@ -74,17 +78,25 @@ class Portfolio:
 
     @staticmethod
     def _clean_float(value) -> float:
-        """Convierte un valor (posiblemente string con formato europeo) a float."""
+        """Convierte un valor (posiblemente string con formato europeo) a float.
+
+        Soporta separador decimal con coma y separador de miles con punto o coma,
+        incluyendo valores como '1,332,135' (→ 1332.135) o '1.332.135' (→ 1332135).
+        """
         if pd.isna(value):
             return 0.0
         if isinstance(value, (int, float)):
             return float(value)
-        v = str(value).replace("€", "").replace("EUR", "").replace("eur", "").replace(" ", "").strip()
-        if "." in v and "," in v:
-            # Determina cuál es el separador decimal por su posición
-            v = v.replace(".", "").replace(",", ".") if v.rfind(",") > v.rfind(".") else v.replace(",", "")
-        elif "," in v:
-            v = v.replace(",", ".")
+        v = str(value).strip()
+        for token in ("€", "EUR", "eur", " "):
+            v = v.replace(token, "")
+        if "," in v:
+            # La última coma es el separador decimal; las anteriores son miles
+            integer_part, _, decimal_part = v.rpartition(",")
+            v = integer_part.replace(",", "").replace(".", "") + "." + decimal_part
+        elif v.count(".") > 1:
+            # Varios puntos → separador de miles sin decimal
+            v = v.replace(".", "")
         try:
             return float(v)
         except ValueError:
@@ -113,63 +125,112 @@ class Portfolio:
         return df.rename(columns=col_map)
 
     def _load_from_excel(self, filepath: str) -> None:
-        """
-        Lee el Excel de órdenes, aplica reglas de negocio y calcula lotes FIFO.
+        """Lee el Excel de órdenes y delega el procesamiento a _process_orders_df."""
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
+        df = pd.read_excel(filepath)
+        self._process_orders_df(df)
 
-        El Excel debe contener al menos las columnas: ISIN, Fecha, Participaciones.
-        La columna Importe es opcional pero necesaria para calcular el precio unitario.
+    def _load_from_tsv(self, filepath: str) -> None:
+        """Lee el TSV de órdenes (separado por tabulador) y delega a _process_orders_df.
+
+        El archivo TSV exportado por la plataforma contiene las columnas:
+            - Fecha de la orden   → Fecha
+            - ISIN                → ISIN
+            - Importe estimado    → Importe (e.g. "1000 EUR")
+            - Nº de participaciones → Participaciones (decimal con coma, e.g. "89,46")
+            - Estado              → Estado
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
+        df = pd.read_csv(filepath, sep="\t", encoding="utf-8", dtype=str)
+        self._process_orders_df(df)
+
+    def _process_orders_df(self, df: pd.DataFrame) -> None:
+        """Normaliza, limpia y aplica reglas de negocio sobre un DataFrame de órdenes.
+
+        El DataFrame debe contener al menos las columnas (tras normalización):
+        ISIN, Fecha, Participaciones.  Importe y Estado son opcionales pero
+        mejoran la calidad de los cálculos.
 
         Nota de localización:
             Excel en español puede exportar 5.317 (= 5,317 participaciones) como
             el entero 5317. Si el NAV implícito resultante es < 5 €, se divide
             por 1000 para corregirlo automáticamente.
         """
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
-
-        df = pd.read_excel(filepath)
         df = self._normalize_columns(df)
 
         # Filtrar solo órdenes ejecutadas
-        if "Estado" in df.columns:
-            valid_states = {"ejecutada", "completada", "procesada", "finalizada", "ok"}
-            df = df[df["Estado"].astype(str).str.lower().str.strip().isin(valid_states)]
+        df = df.loc[lambda x: x.Estado == "Finalizada"]
 
-        # Limpiar tipos
+        # Limpiar tipos — _clean_float maneja comas decimales y sufijos "EUR"
         df["Participaciones"] = df["Participaciones"].apply(self._clean_float)
         if "Importe" in df.columns:
             df["Importe"] = df["Importe"].apply(self._clean_float)
 
-        df["Fecha"] = pd.to_datetime(df["Fecha"])
+        df["Fecha"] = pd.to_datetime(df["Fecha"], dayfirst=True)
 
-        # Estandarizar ISIN para las reglas
+        # Estandarizar ISIN
         df_isin = df["ISIN"].astype(str).str.strip().str.upper()
+        df["ISIN"] = df_isin
 
-        # Regla 1: Reembolsos específicos que deben tener signo negativo
+        # Regla: Reembolsos específicos que deben tener signo negativo
+        # (El archivo no tiene columna Tipo; se identifican manualmente)
         is_ie00 = df_isin == "IE00BYX5MX67"
-        is_feb24 = (df["Fecha"].dt.month == 2) & (df["Fecha"].dt.day == 24)
-        
-        mask1 = is_ie00 & is_feb24 & (((df["Participaciones"].abs() - 70.082).abs() < 0.1) | ((df["Participaciones"].abs() - 70082).abs() < 10))
+        is_feb24_2026 = (df["Fecha"] == "2026-02-24")
+
+        # IE00BYX5MX67 — reembolso de ~70.082 participaciones
+        mask1 = is_ie00 & is_feb24_2026 & (
+            ((df["Participaciones"].abs() - 70.082).abs() < 0.5)
+            # | ((df["Participaciones"].abs() - 70082).abs() < 50)
+        )
         df.loc[mask1, "Participaciones"] = -df.loc[mask1, "Participaciones"].abs()
 
-        mask2 = is_ie00 & is_feb24 & (((df["Participaciones"].abs() - 140.164).abs() < 0.1) | ((df["Participaciones"].abs() - 140164).abs() < 10))
+        # IE00BYX5MX67 — reembolso de ~140.164 participaciones
+        mask2 = is_ie00 & is_feb24_2026 & (
+            ((df["Participaciones"].abs() - 140.164).abs() < 0.5)
+            | ((df["Participaciones"].abs() - 140164).abs() < 50)
+        )
         df.loc[mask2, "Participaciones"] = -df.loc[mask2, "Participaciones"].abs()
 
-        mask3 = (df_isin == "FR0000989626") & (df["Fecha"].dt.month == 9) & (df["Fecha"].dt.day == 14) & (df["Fecha"].dt.year == 2025)
+        # FR0000989626 — reembolso del 14/09/2025
+        mask3 = (
+            (df_isin == "FR0000989626")
+            & (df["Fecha"].dt.year == 2025)
+            & (df["Fecha"].dt.month == 9)
+            & (df["Fecha"].dt.day == 14)
+        )
         df.loc[mask3, "Participaciones"] = -df.loc[mask3, "Participaciones"].abs()
 
-        # Regla 2: Dividir por 1000 las participaciones de ciertos ISINs
-        isins_to_divide = ["ES0146309002", "FR0000989626", "LU0302296495"]
-        mask_isin = df_isin.isin(isins_to_divide)
-        df.loc[mask_isin, "Participaciones"] = df.loc[mask_isin, "Participaciones"] / 1000.0
-
-        df = df.sort_values("Fecha")
+        df = df.sort_values("Fecha").reset_index(drop=True)
+        self.movements = df.copy()
 
         for isin, group in df.groupby("ISIN"):
             isin_str = str(isin).strip()
             if isin_str in ("nan", ""):
                 continue
             self._apply_fifo(isin_str, group)
+
+    @staticmethod
+    def _fix_localization(units: float, amount: float) -> float:
+        """Corrige el bug de localización de Excel español.
+
+        Excel puede exportar 5,317 como el entero 5317 (elimina la coma
+        decimal). Detectamos el caso cuando el NAV implícito
+        (importe / participaciones) es irrazonablemente bajo (< 5 €).
+
+        Si importe es 0 pero las participaciones son enteras ≥ 1000,
+        también se asume localización errónea.
+        """
+        if units % 1 == 0:
+            return units/1000.0
+        if units < 100 or (units % 1 != 0):
+            return units
+        if amount > 0 and (amount / units) < 5.0:
+            return units / 1000.0
+        if amount == 0 and units >= 1000:
+            return units / 1000.0
+        return units
 
     def _apply_fifo(self, isin: str, group: pd.DataFrame) -> None:
         """Aplica contabilidad FIFO a las transacciones de un ISIN."""
@@ -189,14 +250,16 @@ class Portfolio:
                 is_sale = True
                 units = abs(units)
 
-            if not is_sale and units > 0:
-                # Corrección del bug de localización de Excel español:
-                # 5.317 participaciones → leído como entero 5317 → NAV implícito irreal
-                if amount > 0 and units >= 1000 and (units % 1 == 0):
-                    if (amount / units) < 5.0:
-                        units /= 1000.0
-                        logger.debug("Corrección de localización aplicada para ISIN %s: %s participaciones", isin, units)
+            # Corrección de localización Excel español (aplica a compras Y ventas)
+            # original_units = units
+            units = self._fix_localization(units, amount)
+            # if units != original_units:
+            #     logger.debug(
+            #         "Corrección de localización para ISIN %s: %.4f → %.4f participaciones",
+            #         isin, original_units, units,
+            #     )
 
+            if not is_sale and units > 0:
                 purchases.append({
                     "ISIN": isin,
                     "Fondo": row.get("Fondo", isin),
@@ -391,7 +454,9 @@ class Portfolio:
             precio_medio = (capital / parts) if parts > 0 else 0.0
 
             precio_actual = live_prices.get(isin) if live_prices else None
-            valor_actual = (parts * precio_actual) if precio_actual is not None else None
+            # Fallback: si el precio live es 0 o None, usar el precio medio de compra
+            precio_valoracion = precio_actual if precio_actual else (precio_medio if precio_medio > 0 else None)
+            valor_actual = (parts * precio_valoracion) if precio_valoracion is not None else None
             ganancia_euros = (valor_actual - capital) if valor_actual is not None else None
             ganancia_pct = (
                 ((valor_actual / capital) - 1) * 100

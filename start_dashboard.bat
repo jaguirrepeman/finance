@@ -1,6 +1,6 @@
 @echo off
 echo ==========================================================
-echo INICIANDO PORTFOLIO TRACKER DASHBOARD (Modo Premium)
+echo INICIANDO PORTFOLIO TRACKER DASHBOARD
 echo ==========================================================
 echo.
 echo Verificando dependencias del servidor...
@@ -19,7 +19,7 @@ echo Abriendo el navegador...
 start http://127.0.0.1:8000
 
 echo.
-echo Todo listo! Se ha abierto otra ventana negra con el servidor.
-echo Para apagar el dashboard, simplemente cierra ESA ventana negra.
+echo Todo listo! Se ha abierto una terminal con el servidor.
+echo Para apagar el dashboard, cierra la terminal.
 timeout /t 5 >nul
 exit
