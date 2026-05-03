@@ -532,13 +532,48 @@ class YFinanceProvider(FundDataProvider):
             return {}
 
     def get_sector_weights(self, isin: str) -> Dict[str, float]:
-        return {}  # yfinance no provee sector weights de fondos
+        try:
+            ticker = self._get_ticker(isin)
+            if not ticker: return {}
+            fd = getattr(ticker, "funds_data", None)
+            if fd and hasattr(fd, "sector_weightings"):
+                return fd.sector_weightings
+        except: pass
+        return {}
 
     def get_country_weights(self, isin: str) -> Dict[str, float]:
         return {}
 
     def get_holdings(self, isin: str) -> pd.DataFrame:
+        try:
+            ticker = self._get_ticker(isin)
+            if not ticker: return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+            fd = getattr(ticker, "funds_data", None)
+            if fd and hasattr(fd, "top_holdings"):
+                h = fd.top_holdings
+                if h is not None and not h.empty:
+                    rows = []
+                    for sym, row in h.iterrows():
+                        rows.append({
+                            "name": row.get("Name", ""),
+                            "ticker": sym if str(sym) != "nan" else "",
+                            "weight": row.get("Holding Percent", 0),
+                            "market_value": 0
+                        })
+                    return pd.DataFrame(rows)
+        except Exception as e:
+            logger.debug("YFinanceProvider.get_holdings failed for %s: %s", isin, e)
         return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+    def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+        try:
+            ticker = self._get_ticker(isin)
+            if not ticker: return {}
+            fd = getattr(ticker, "funds_data", None)
+            if fd and hasattr(fd, "asset_classes"):
+                return fd.asset_classes
+        except: pass
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -569,33 +604,31 @@ class CompositeProvider(FundDataProvider):
             self._data_chain = providers
         else:
             from .finect_provider import FinectProvider
+            from .ft_provider import FTProvider
 
             fmp = FMPProvider()
             mstar = MStarProvider(cache_path=cache_path)
             yf = YFinanceProvider()
             finect = FinectProvider()
+            ft = FTProvider()
 
             # Cadena NAV: prioriza velocidad
-            # FMP (~300ms, solo 1 request) → YFinance (~500ms) → MStar (usa caché/yfinance)
-            # FMP es preferido porque: 1 HTTP call, no depende de pytz,
-            # devuelve None rápido si no encuentra el ISIN
+            # FMP (~300ms, solo 1 request) → YFinance (~500ms)
             self._nav_chain: List[FundDataProvider] = []
             if fmp.available:
                 self._nav_chain.append(fmp)
             self._nav_chain.append(yf)
-            self._nav_chain.append(mstar)
 
-            # Cadena datos: prioriza completitud
-            # MStar (más completo) → FMP (ETFs) → Finect (comisiones/gestora)
-            self._data_chain: List[FundDataProvider] = [mstar]
+            # Cadena datos: FTProvider (sectores/holdings/regiones para UCITS europeos)
+            # + YFinance (fondos americanos, ETFs, sector_weightings) + FMP
+            self._data_chain: List[FundDataProvider] = [ft, yf]
             if fmp.available:
                 self._data_chain.append(fmp)
-            self._data_chain.append(finect)
 
-            # Mantener .providers para compatibilidad (unión de ambas cadenas, sin duplicados)
+            # Mantener .providers para compatibilidad (unión de todas las cadenas, sin duplicados)
             seen = set()
             self.providers: List[FundDataProvider] = []
-            for p in self._nav_chain + self._data_chain:
+            for p in self._nav_chain + self._data_chain + [mstar, finect]:
                 pid = id(p)
                 if pid not in seen:
                     seen.add(pid)
@@ -700,6 +733,19 @@ class CompositeProvider(FundDataProvider):
                 result = p.get_holdings(isin)
                 if result is not None and not result.empty and len(result) > len(best):
                     best = result
+            except Exception:
+                continue
+        return best
+
+    def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+        best: Dict[str, float] = {}
+        for p in self._data_chain:
+            try:
+                func = getattr(p, "get_asset_allocation", None)
+                if func:
+                    result = func(isin)
+                    if result and len(result) > len(best):
+                        best = result
             except Exception:
                 continue
         return best

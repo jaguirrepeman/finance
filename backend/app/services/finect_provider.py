@@ -429,8 +429,9 @@ class FinectProvider(FundDataProvider):
         return {}
 
     def get_holdings(self, isin: str) -> pd.DataFrame:
-        """Top holdings del fondo."""
-        soup = self._get_soup(isin)
-        if soup is None:
-            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-        return _extract_holdings(soup)
+        """Finect renderiza holdings vía JS. Scraping estático devuelve vacío."""
+        return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+    def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+        """Finect renderiza asset allocation vía JS. Scraping estático devuelve vacío."""
+        return {}
