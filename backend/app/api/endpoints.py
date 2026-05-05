@@ -25,7 +25,7 @@ from ..schemas.portfolio import (
     SimulationRequest,
     SimulationResponse,
 )
-from ..services.portfolio_service import (
+from ..services.portfolio_service_v2 import (
     CACHE_DIR,
     EXCEL_PATH,
     TSV_PATH,
@@ -217,8 +217,7 @@ async def get_last_update():
 
     # Calcular antigüedad de la caché
     import os as _os
-    from ..services.portfolio_service import CACHE_DIR as _CACHE_DIR
-    cache_path = _os.path.join(_CACHE_DIR, "history_batch.json")
+    cache_path = str(CACHE_DIR / "history_batch.json")
     cache_age = None
     if _os.path.exists(cache_path):
         import time
@@ -288,31 +287,46 @@ async def get_open_lots():
 async def tax_optimize(request: TaxOptimizeRequest):
     """Calcula el plan de retirada fiscal óptimo."""
     client = get_portfolio_client()
-    from ..services.tax_calculator import TaxOptimizer
-
-    prices = client._fetch_prices()
-    optimizer = TaxOptimizer(client.portfolio, prices=prices)
-    plan = optimizer.optimize_withdrawal(request.target_amount)
+    df = client.tax_optimize(request.target_amount)
 
     steps = []
-    for step in plan.get("plan", []):
-        fecha = step.get("Fecha_Compra")
+    for _, row in df.iterrows():
+        fecha = row.get("Fecha_Compra")
         fecha_str = fecha.strftime("%Y-%m-%d") if hasattr(fecha, "strftime") else str(fecha) if fecha else None
         steps.append(TaxPlanStep(
-            ISIN=step["ISIN"],
-            Fondo=step.get("Fondo", step["ISIN"]),
+            ISIN=row["ISIN"],
+            Fondo=row.get("Fondo", row["ISIN"]),
             Fecha_Compra=fecha_str,
-            Participaciones_Vendidas=safe_float(step.get("Participaciones_Vendidas", 0)),
-            Importe_Retirado=safe_float(step.get("Importe_Retirado", 0)),
-            Ganancia_Patrimonial=safe_float(step.get("Ganancia_Patrimonial", 0)),
+            Participaciones_Vendidas=safe_float(row.get("Participaciones_Vendidas", 0)),
+            Importe_Retirado=safe_float(row.get("Importe_Retirado", 0)),
+            Ganancia_Patrimonial=safe_float(row.get("Ganancia_Patrimonial", 0)),
         ))
 
+    total_retirado = sum(s.Importe_Retirado for s in steps)
+    total_ganancia = sum(s.Ganancia_Patrimonial for s in steps)
+
+    # Tramos IRPF España 2024
+    def _calcular_impuesto(ganancia: float) -> float:
+        if ganancia <= 0:
+            return 0.0
+        tax = 0.0
+        tramos = [(6000, 0.19), (44000, 0.21), (150000, 0.23), (float("inf"), 0.27)]
+        acum = 0.0
+        for limite, tipo in tramos:
+            tramo = min(ganancia - acum, limite)
+            if tramo <= 0:
+                break
+            tax += tramo * tipo
+            acum += tramo
+        return round(tax, 2)
+
+    impuesto = _calcular_impuesto(total_ganancia)
     return TaxOptimizeResponse(
-        target_amount=plan["target_amount"],
-        withdrawn_amount=safe_float(plan["withdrawn_amount"]),
-        total_capital_gain=safe_float(plan["total_capital_gain"]),
-        estimated_tax=safe_float(plan["estimated_tax"]),
-        net_amount=safe_float(plan["net_amount"]),
+        target_amount=request.target_amount,
+        withdrawn_amount=round(total_retirado, 2),
+        total_capital_gain=round(total_ganancia, 2),
+        estimated_tax=impuesto,
+        net_amount=round(total_retirado - impuesto, 2),
         plan=steps,
     )
 
