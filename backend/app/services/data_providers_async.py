@@ -148,6 +148,16 @@ def _extract_header(model: Dict[str, Any]) -> Dict[str, Any]:
         info["srri"] = srri
     if tna := model.get("totalNetAsset"):
         info["total_net_asset"] = tna
+    # Inception date: try managementStart at model level, then classes
+    launch = model.get("managementStart")
+    if not launch:
+        for cls in model.get("classes", []):
+            launch = cls.get("launchDate") or cls.get("managementStart")
+            if launch:
+                break
+    if launch:
+        # Normalize to YYYY-MM-DD
+        info["inception_date"] = str(launch)[:10]
     return info
 
 
@@ -1167,8 +1177,12 @@ class CompositeAsyncProvider:
     async def get_nav_batch(self, isins: List[str]) -> Dict[str, float]:
         """Obtiene NAVs de todos los ISINs en paralelo."""
         async def _get_one(isin: str) -> tuple:
-            price = await self.get_nav(isin)
-            return isin, price if price and price > 0 else 0.0
+            try:
+                price = await self.get_nav(isin)
+                return isin, price if price and price > 0 else 0.0
+            except Exception as exc:
+                logger.warning("get_nav_batch: failed for %s: %s", isin, exc)
+                return isin, 0.0
 
         results = await asyncio.gather(*[_get_one(isin) for isin in isins])
         return dict(results)

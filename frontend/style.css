@@ -200,3 +200,14 @@ tr:hover td {
     margin-bottom: 1rem;
 }
 @keyframes spin { 100% { transform: rotate(360deg); } }
+
+/* Hide number input spinner arrows */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+input[type=number] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}

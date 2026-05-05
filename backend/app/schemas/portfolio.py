@@ -23,6 +23,7 @@ class FundBase(BaseModel):
     Capital_Invertido: Optional[float] = None
     Ganancia_Abs: Optional[float] = None
     Ganancia_Pct: Optional[float] = None
+    finect_url: Optional[str] = None  # Full Finect URL with slug
 
     class Config:
         populate_by_name = True
@@ -58,6 +59,7 @@ class PositionItem(BaseModel):
     Valor_Actual: Optional[float] = None
     Ganancia_Euros: Optional[float] = None
     Ganancia_Pct: Optional[float] = None
+    finect_url: Optional[str] = None  # Full Finect URL with slug
 
 
 class PositionsResponse(BaseModel):
@@ -131,6 +133,7 @@ class FundDetailResponse(BaseModel):
     market_cap: Dict[str, float] = {}
     holdings: List[Dict[str, Any]] = []
     source: str = ""
+    finect_url: Optional[str] = None
 
 
 class FundSearchResult(BaseModel):
@@ -140,6 +143,21 @@ class FundSearchResult(BaseModel):
     category: Optional[str] = None
     management_company: Optional[str] = None
     in_portfolio: bool = False
+    url: Optional[str] = None  # Full Finect URL with slug
+
+
+class TraspasoFundItem(BaseModel):
+    """Análisis de un fondo respecto a la optimización por traspaso."""
+    isin: str
+    nombre: str = ""
+    valor_actual: float = 0.0
+    capital_invertido: float = 0.0
+    plusvalia_latente: float = 0.0
+    plusvalia_pct: float = 0.0
+    impuesto_si_vendes: float = 0.0
+    ahorro_traspaso: float = 0.0
+    num_lotes: int = 0
+    cualifica_traspaso: bool = True
 
 
 class SimulationRequest(BaseModel):

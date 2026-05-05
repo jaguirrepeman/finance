@@ -58,6 +58,10 @@ EXCEL_PATH = DATA_DIR / "Ordenes.xlsx"
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Lock to prevent concurrent pipeline runs from competing on SQLite
+import threading as _threading
+_pipeline_lock = _threading.Lock()
+
 
 def _get_orders_source() -> Optional[str]:
     """Devuelve la ruta al fichero de órdenes más reciente."""
@@ -121,11 +125,11 @@ def get_portfolio_client(force_refresh: bool = False):
     if _client_instance is None or force_refresh:
         from ..client_v2 import PortfolioClient
 
-        cache_path = str(DATA_DIR / "cache")
+        # Do NOT pass cache_path — let CacheStore use its default (LOCALAPPDATA)
+        # to avoid OneDrive sync locking the SQLite database.
         source = _get_orders_source()
         _client_instance = PortfolioClient(
             source=source,
-            cache_path=cache_path,
             force_refresh=force_refresh,
         )
         logger.info(
@@ -220,6 +224,13 @@ def build_summary() -> Dict[str, Any]:
         details[fund_type.value] = details.get(fund_type.value, 0) + peso
         is_idx = is_index_fund(info=info)
 
+        # Resolve Finect URL with slug for General tab links
+        try:
+            from .finect_provider import _get_finect_url as _gfu
+            finect_url = _gfu(isin)
+        except Exception:
+            finect_url = None
+
         enr_row = enriched[enriched["ISIN"] == isin].iloc[0] if not enriched.empty and isin in enriched["ISIN"].values else {}
         price_str = f"{safe_float(row.get('Precio_Actual', 0)):.2f}" if pd.notna(row.get("Precio_Actual")) else "---"
         ganancia_pct = row.get("Ganancia_Pct")
@@ -242,6 +253,7 @@ def build_summary() -> Dict[str, Any]:
             "Capital_Invertido": round(safe_float(row.get("Capital_Invertido", 0)), 2),
             "Ganancia_Abs": round(safe_float(row.get("Ganancia_Euros", 0)), 2),
             "Ganancia_Pct": round(safe_float(ganancia_pct), 2) if pd.notna(ganancia_pct) else None,
+            "finect_url": finect_url,
         })
 
     total_indexed = sum(f["Porcentaje"] for f in funds_list if f["IsIndex"])
@@ -298,12 +310,20 @@ def build_details() -> Dict[str, Any]:
         pct = (valor / total_val * 100) if total_val > 0 else 0
         fund_type = classify_fund(info=info)
 
+        # Resolve Finect URL with slug
+        try:
+            from .finect_provider import _get_finect_url as _get_url
+            finect_url = _get_url(isin)
+        except Exception:
+            finect_url = None
+
         result[name] = {
             "isin": isin,
             "sector": sectors,
             "region": regions,
             "percentage": round(pct, 2),
             "tipo": fund_type.name,
+            "finect_url": finect_url,
         }
 
     return result
@@ -406,13 +426,30 @@ def simulate_addition(isin: str, amount: float) -> Dict[str, Any]:
     client = get_portfolio_client()
     result = client.simulate_addition(isin, amount)
 
+    # Map columns to the SimulatedFundDetail schema
+    funds = [
+        {
+            "isin": row["ISIN"],
+            "name": row["Fondo"],
+            "current_weight": row.get("Peso_Actual", 0.0),
+            "simulated_weight": row.get("Peso_Simulado", 0.0),
+        }
+        for row in result["weights"].to_dict(orient="records")
+    ]
+
     return {
+        "added_isin": isin,
         "added_name": result["metadata"]["added_name"],
+        "added_amount": amount,
         "current_total": result["metadata"]["current_total"],
         "simulated_total": result["metadata"]["simulated_total"],
-        "funds": result["weights"].to_dict(orient="records"),
+        "funds": funds,
         "current_portfolio_metrics": {},
         "simulated_portfolio_metrics": {},
+        "history_current": [],
+        "history_fund": [],
+        "history_simulated": [],
+        "period_returns": [],
     }
 
 
@@ -422,73 +459,95 @@ def simulate_addition(isin: str, amount: float) -> Dict[str, Any]:
 
 
 def run_analytics_pipeline(force_download: bool = False):
-    """Recalcula todos los datos y los escribe a calculated/."""
-    logger.info("=== Analytics Pipeline v2 START (force=%s) ===", force_download)
-    start = time.time()
+    """Recalcula todos los datos y los escribe a calculated/.
 
-    if force_download:
-        reset_client(force_refresh=True)
-
+    Usa un lock para evitar ejecuciones concurrentes que bloquearian SQLite.
+    Si ya hay un pipeline en curso, la llamada retorna inmediatamente.
+    """
+    if not _pipeline_lock.acquire(blocking=False):
+        logger.info("Analytics Pipeline ya en ejecucion — omitiendo llamada duplicada")
+        return
     try:
-        summary = build_summary()
-        _save_json("summary.json", summary)
-    except Exception as e:
-        logger.error("Error building summary: %s", e)
+        logger.info("=== Analytics Pipeline v2 START (force=%s) ===", force_download)
+        start = time.time()
 
-    try:
-        details = build_details()
-        _save_json("details.json", details)
-    except Exception as e:
-        logger.error("Error building details: %s", e)
+        if force_download:
+            reset_client(force_refresh=True)
 
-    try:
-        history = build_history_batch()
-        _save_json("history_batch.json", history)
-    except Exception as e:
-        logger.error("Error building history_batch: %s", e)
+        try:
+            summary = build_summary()
+            _save_json("summary.json", summary)
+        except Exception as e:
+            logger.error("Error building summary: %s", e)
 
-    try:
-        corr = build_correlation()
-        _save_json("correlation.json", corr)
-    except Exception as e:
-        logger.error("Error building correlation: %s", e)
+        try:
+            details = build_details()
+            _save_json("details.json", details)
+        except Exception as e:
+            logger.error("Error building details: %s", e)
 
-    elapsed = time.time() - start
-    logger.info("=== Analytics Pipeline v2 DONE in %.1fs ===", elapsed)
+        try:
+            history = build_history_batch()
+            _save_json("history_batch.json", history)
+        except Exception as e:
+            logger.error("Error building history_batch: %s", e)
+
+        try:
+            corr = build_correlation()
+            _save_json("correlation.json", corr)
+        except Exception as e:
+            logger.error("Error building correlation: %s", e)
+
+        elapsed = time.time() - start
+        logger.info("=== Analytics Pipeline v2 DONE in %.1fs ===", elapsed)
+    finally:
+        _pipeline_lock.release()
 
 
 def run_nav_pipeline(force_download: bool = False):
     """Recalcula solo cotizaciones: summary + history + correlation."""
-    logger.info("=== NAV Pipeline v2 START (force=%s) ===", force_download)
-    start = time.time()
-    if force_download:
-        reset_client(force_refresh=True)
+    if not _pipeline_lock.acquire(blocking=False):
+        logger.info("NAV Pipeline ya en ejecucion — omitiendo llamada duplicada")
+        return
     try:
-        _save_json("summary.json", build_summary())
-    except Exception as e:
-        logger.error("Error building summary: %s", e)
-    try:
-        _save_json("history_batch.json", build_history_batch())
-    except Exception as e:
-        logger.error("Error building history_batch: %s", e)
-    try:
-        _save_json("correlation.json", build_correlation())
-    except Exception as e:
-        logger.error("Error building correlation: %s", e)
-    logger.info("=== NAV Pipeline v2 DONE in %.1fs ===", time.time() - start)
+        logger.info("=== NAV Pipeline v2 START (force=%s) ===", force_download)
+        start = time.time()
+        if force_download:
+            reset_client(force_refresh=True)
+        try:
+            _save_json("summary.json", build_summary())
+        except Exception as e:
+            logger.error("Error building summary: %s", e)
+        try:
+            _save_json("history_batch.json", build_history_batch())
+        except Exception as e:
+            logger.error("Error building history_batch: %s", e)
+        try:
+            _save_json("correlation.json", build_correlation())
+        except Exception as e:
+            logger.error("Error building correlation: %s", e)
+        logger.info("=== NAV Pipeline v2 DONE in %.1fs ===", time.time() - start)
+    finally:
+        _pipeline_lock.release()
 
 
 def run_details_pipeline(force_download: bool = False):
     """Recalcula solo detalles (sectores, regiones, métricas)."""
-    logger.info("=== Details Pipeline v2 START (force=%s) ===", force_download)
-    start = time.time()
-    if force_download:
-        reset_client(force_refresh=True)
+    if not _pipeline_lock.acquire(blocking=False):
+        logger.info("Details Pipeline ya en ejecucion — omitiendo llamada duplicada")
+        return
     try:
-        _save_json("details.json", build_details())
-    except Exception as e:
-        logger.error("Error building details: %s", e)
-    logger.info("=== Details Pipeline v2 DONE in %.1fs ===", time.time() - start)
+        logger.info("=== Details Pipeline v2 START (force=%s) ===", force_download)
+        start = time.time()
+        if force_download:
+            reset_client(force_refresh=True)
+        try:
+            _save_json("details.json", build_details())
+        except Exception as e:
+            logger.error("Error building details: %s", e)
+        logger.info("=== Details Pipeline v2 DONE in %.1fs ===", time.time() - start)
+    finally:
+        _pipeline_lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -522,16 +581,30 @@ async def _get_fund_detail_async(isin: str) -> Dict[str, Any]:
     client = get_portfolio_client()
     provider = client.provider
 
-    info, sectors, countries, holdings_df = await asyncio.gather(
+    results = await asyncio.gather(
         provider.get_fund_info(isin),
         provider.get_sector_weights(isin),
         provider.get_country_weights(isin),
         provider.get_holdings(isin),
+        return_exceptions=True,
     )
+
+    info = results[0] if not isinstance(results[0], BaseException) else {}
+    sectors = results[1] if not isinstance(results[1], BaseException) else {}
+    countries = results[2] if not isinstance(results[2], BaseException) else {}
+    holdings_df = results[3] if not isinstance(results[3], BaseException) else pd.DataFrame()
+
     info = info or {}
     sectors = sectors or {}
     countries = countries or {}
-    holdings = holdings_df.to_dict("records") if not holdings_df.empty else []
+    holdings = holdings_df.to_dict("records") if hasattr(holdings_df, 'empty') and not holdings_df.empty else []
+
+    # Resolve the full Finect URL with slug for this ISIN
+    try:
+        from .finect_provider import _get_finect_url as _sync_finect_url
+        finect_url = _sync_finect_url(isin)
+    except Exception:
+        finect_url = None
 
     return {
         "isin": isin,
@@ -551,6 +624,7 @@ async def _get_fund_detail_async(isin: str) -> Dict[str, Any]:
         "market_cap": {},
         "holdings": holdings,
         "source": info.get("source", ""),
+        "finect_url": finect_url,
     }
 
 
@@ -561,17 +635,44 @@ def get_fund_detail_full(isin: str) -> Dict[str, Any]:
 
 _fund_detail_cache: Dict[str, Any] = {}
 _fund_detail_cache_ts: Dict[str, float] = {}
-_FUND_DETAIL_TTL = 3600  # 1 hora
+_FUND_DETAIL_TTL = 3600  # 1 hora en memoria
+_FUND_DETAIL_DISK_TTL = 86400 * 7  # 7 días en disco
 
 
 def get_fund_detail_full_cached(isin: str) -> Dict[str, Any]:
-    """Wrapper de get_fund_detail_full con caché en memoria (TTL 1h)."""
+    """Wrapper de get_fund_detail_full con caché en memoria (TTL 1h) y disco (TTL 7 días)."""
+    import os as _os
+
     now = time.time()
+    # 1. In-memory cache (fast path)
     if isin in _fund_detail_cache and now - _fund_detail_cache_ts.get(isin, 0) < _FUND_DETAIL_TTL:
         return _fund_detail_cache[isin]
+
+    # 2. Disk cache
+    disk_path = CACHE_DIR / f"fund_detail_{isin}.json"
+    if disk_path.exists():
+        age = now - disk_path.stat().st_mtime
+        if age < _FUND_DETAIL_DISK_TTL:
+            try:
+                import json as _json
+                with open(disk_path, "r", encoding="utf-8") as f:
+                    detail = _json.load(f)
+                _fund_detail_cache[isin] = detail
+                _fund_detail_cache_ts[isin] = now
+                return detail
+            except Exception:
+                pass  # if corrupt, re-fetch
+
+    # 3. Fetch from provider
     detail = get_fund_detail_full(isin)
     _fund_detail_cache[isin] = detail
     _fund_detail_cache_ts[isin] = now
+    try:
+        import json as _json
+        with open(disk_path, "w", encoding="utf-8") as f:
+            _json.dump(detail, f, ensure_ascii=False, default=str)
+    except Exception:
+        pass  # disk write failures are non-fatal
     return detail
 
 
@@ -609,18 +710,42 @@ def build_msci_world_benchmark() -> Dict[str, Any]:
 
 def search_funds(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Busca fondos en el índice de sitemaps de Finect (por ISIN o nombre)."""
-    async def _fetch_index():
-        client = get_portfolio_client()
-        return await client.provider._finect._load_sitemap_index()
+    return _run(search_funds_async(query, limit=limit))
 
-    index: Dict[str, str] = _run(_fetch_index())
-    if not index:
-        return []
 
-    query_lower = query.lower().strip()
+async def search_funds_async(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Versión async de search_funds: busca en el sitemap de Finect + portfolio local."""
     client = get_portfolio_client()
-    pos = client.movements()  # ligero, no hace network
     portfolio_isins: set = set(client.portfolio.positions.keys())
+    query_lower = query.lower().strip()
+
+    # --- Fallback: fondos del portfolio que coinciden ---
+    portfolio_matches: List[Dict[str, Any]] = []
+    history_cache = load_json("history_batch.json") or {}
+    for isin in portfolio_isins:
+        name = history_cache.get(isin, {}) if isinstance(history_cache.get(isin), dict) else isin
+        if isinstance(history_cache.get(isin), list):
+            name = isin  # history_batch stores lists of {date,price}
+        # Try to get name from details cache
+        details_cache = load_json("details.json") or {}
+        for fund_name, fund_data in details_cache.items():
+            if isinstance(fund_data, dict) and fund_data.get("isin") == isin:
+                name = fund_name
+                break
+        if query_lower in isin.lower() or query_lower in str(name).lower():
+            portfolio_matches.append({"isin": isin, "name": str(name), "in_portfolio": True})
+
+    # --- Try sitemap index ---
+    try:
+        index: Dict[str, str] = await client.provider._finect._load_sitemap_index()
+    except Exception as e:
+        logger.warning("Async sitemap index load failed: %s — trying sync fallback", e)
+        try:
+            from .finect_provider import _load_sitemap_index as _sync_sitemap
+            index = _sync_sitemap()
+        except Exception as e2:
+            logger.warning("Sync sitemap fallback also failed: %s", e2)
+            index = {}
 
     results: List[Dict[str, Any]] = []
     exact_matches: List[Dict[str, Any]] = []
@@ -640,5 +765,9 @@ def search_funds(query: str, limit: int = 20) -> List[Dict[str, Any]]:
         elif query_lower in isin.lower() or query_lower in slug_name.lower():
             results.append(entry)
 
-    combined = exact_matches + results
+    # Merge: portfolio matches first (if not already in sitemap results), then sitemap
+    sitemap_isins = {e["isin"] for e in exact_matches + results}
+    extra_portfolio = [m for m in portfolio_matches if m["isin"] not in sitemap_isins]
+
+    combined = exact_matches + extra_portfolio + results
     return combined[:limit]

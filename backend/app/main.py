@@ -13,10 +13,10 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from .api import endpoints
-from .services.portfolio_service import load_json, run_analytics_pipeline
+from .services.portfolio_service_v2 import load_json, run_analytics_pipeline
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -101,5 +101,29 @@ if os.path.isdir(FRONTEND_DIR):
     @app.get("/", include_in_schema=False)
     def serve_index():
         return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+    @app.get("/components.js", include_in_schema=False)
+    def serve_components_js():
+        """Serve components.js with no-cache so browser always gets the latest build."""
+        path = os.path.join(FRONTEND_DIR, "components.js")
+        with open(path, "rb") as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    @app.get("/style.css", include_in_schema=False)
+    def serve_style_css():
+        """Serve style.css with no-cache so CSS changes are always applied."""
+        path = os.path.join(FRONTEND_DIR, "style.css")
+        with open(path, "rb") as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type="text/css",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
 
     app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")

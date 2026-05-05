@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .api import endpoints
@@ -119,5 +119,27 @@ if FRONTEND_DIR.is_dir():
     @app.get("/", include_in_schema=False)
     def serve_index():
         return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+    @app.get("/components.js", include_in_schema=False)
+    def serve_components_js():
+        """Serve components.js sin cache para que el navegador siempre cargue la versión más reciente."""
+        with open(str(FRONTEND_DIR / "components.js"), "rb") as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    @app.get("/style.css", include_in_schema=False)
+    def serve_style_css():
+        """Serve style.css sin cache."""
+        with open(str(FRONTEND_DIR / "style.css"), "rb") as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type="text/css",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
 
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")

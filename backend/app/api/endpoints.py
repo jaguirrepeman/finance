@@ -24,6 +24,7 @@ from ..schemas.portfolio import (
     FundSearchResult,
     SimulationRequest,
     SimulationResponse,
+    TraspasoFundItem,
 )
 from ..services.portfolio_service_v2 import (
     CACHE_DIR,
@@ -43,8 +44,10 @@ from ..services.portfolio_service_v2 import (
     reset_client,
     safe_float,
     search_funds,
+    search_funds_async,
     get_fund_detail_full,
     simulate_addition,
+    _get_fund_detail_async,
 )
 
 router = APIRouter()
@@ -233,10 +236,21 @@ async def get_positions():
     df = client.positions(live=True)
 
     positions = []
+    # Precompute finect URLs from the cached sitemap (fast, sync)
+    try:
+        from ..services.finect_provider import _get_finect_url
+    except Exception:
+        _get_finect_url = lambda isin: None  # noqa: E731
+
     for _, row in df.iterrows():
+        isin = row["ISIN"]
+        try:
+            finect_url = _get_finect_url(isin)
+        except Exception:
+            finect_url = None
         positions.append(PositionItem(
-            ISIN=row["ISIN"],
-            Fondo=row.get("Fondo", row["ISIN"]),
+            ISIN=isin,
+            Fondo=row.get("Fondo", isin),
             Participaciones=safe_float(row.get("Participaciones", 0)),
             Precio_Compra_Medio=safe_float(row.get("Precio_Compra_Medio", 0)),
             Capital_Invertido=safe_float(row.get("Capital_Invertido", 0)),
@@ -244,6 +258,7 @@ async def get_positions():
             Valor_Actual=row.get("Valor_Actual"),
             Ganancia_Euros=row.get("Ganancia_Euros"),
             Ganancia_Pct=row.get("Ganancia_Pct"),
+            finect_url=finect_url,
         ))
 
     total_invested = sum(p.Capital_Invertido for p in positions)
@@ -286,41 +301,62 @@ async def get_open_lots():
 @router.post("/tax-optimize", response_model=TaxOptimizeResponse)
 async def tax_optimize(request: TaxOptimizeRequest):
     """Calcula el plan de retirada fiscal óptimo."""
-    client = get_portfolio_client()
-    df = client.tax_optimize(request.target_amount)
+    try:
+        client = get_portfolio_client()
+        # Call the async core directly to avoid nested event-loop issues
+        df = await client.core.tax_optimize(request.target_amount)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error calculando plan de retirada: {exc}") from exc
+
+    # Filter out the synthetic TOTAL row added by client_async
+    plan_df = df[df["ISIN"] != "── TOTAL ──"]
 
     steps = []
-    for _, row in df.iterrows():
+    for _, row in plan_df.iterrows():
         fecha = row.get("Fecha_Compra")
-        fecha_str = fecha.strftime("%Y-%m-%d") if hasattr(fecha, "strftime") else str(fecha) if fecha else None
+        import pandas as _pd
+        if fecha is None or (_pd.isna(fecha) if not isinstance(fecha, str) else False):
+            fecha_str = None
+        elif hasattr(fecha, "strftime"):
+            try:
+                fecha_str = fecha.strftime("%Y-%m-%d")
+            except Exception:
+                fecha_str = None
+        else:
+            fecha_str = str(fecha) or None
+        fondo_val = row.get("Fondo")
+        fondo_str = str(fondo_val) if fondo_val is not None and not (isinstance(fondo_val, float) and _pd.isna(fondo_val)) else str(row.get("ISIN", ""))
         steps.append(TaxPlanStep(
-            ISIN=row["ISIN"],
-            Fondo=row.get("Fondo", row["ISIN"]),
+            ISIN=str(row.get("ISIN", "")),
+            Fondo=fondo_str,
             Fecha_Compra=fecha_str,
             Participaciones_Vendidas=safe_float(row.get("Participaciones_Vendidas", 0)),
             Importe_Retirado=safe_float(row.get("Importe_Retirado", 0)),
             Ganancia_Patrimonial=safe_float(row.get("Ganancia_Patrimonial", 0)),
         ))
 
-    total_retirado = sum(s.Importe_Retirado for s in steps)
-    total_ganancia = sum(s.Ganancia_Patrimonial for s in steps)
+    # Use attrs set by client_async (more reliable than re-summing)
+    total_retirado = safe_float(df.attrs.get("withdrawn_amount") or sum(s.Importe_Retirado for s in steps))
+    total_ganancia = safe_float(df.attrs.get("total_capital_gain") or sum(s.Ganancia_Patrimonial for s in steps))
+    impuesto = safe_float(df.attrs.get("estimated_tax") or 0)
 
-    # Tramos IRPF España 2024
-    def _calcular_impuesto(ganancia: float) -> float:
-        if ganancia <= 0:
-            return 0.0
-        tax = 0.0
-        tramos = [(6000, 0.19), (44000, 0.21), (150000, 0.23), (float("inf"), 0.27)]
-        acum = 0.0
-        for limite, tipo in tramos:
-            tramo = min(ganancia - acum, limite)
-            if tramo <= 0:
-                break
-            tax += tramo * tipo
-            acum += tramo
-        return round(tax, 2)
+    if not impuesto:
+        # Tramos IRPF España 2024
+        def _calcular_impuesto(ganancia: float) -> float:
+            if ganancia <= 0:
+                return 0.0
+            tax = 0.0
+            tramos = [(6000, 0.19), (44000, 0.21), (150000, 0.23), (float("inf"), 0.27)]
+            acum = 0.0
+            for limite, tipo in tramos:
+                tramo = min(ganancia - acum, limite)
+                if tramo <= 0:
+                    break
+                tax += tramo * tipo
+                acum += tramo
+            return round(tax, 2)
+        impuesto = _calcular_impuesto(total_ganancia)
 
-    impuesto = _calcular_impuesto(total_ganancia)
     return TaxOptimizeResponse(
         target_amount=request.target_amount,
         withdrawn_amount=round(total_retirado, 2),
@@ -329,6 +365,26 @@ async def tax_optimize(request: TaxOptimizeRequest):
         net_amount=round(total_retirado - impuesto, 2),
         plan=steps,
     )
+
+
+@router.get("/traspaso-analysis", response_model=List[TraspasoFundItem])
+async def traspaso_analysis():
+    """
+    Analiza qué fondos podrían traspasarse en lugar de venderse para diferir impuestos.
+
+    Normativa aplicable:
+    - Art. 94 Ley 35/2006 del IRPF: los traspasos entre Instituciones de Inversión
+      Colectiva (IICs) no tributan; la plusvalía latente se difiere hasta la
+      venta definitiva.
+    - Solo aplica a fondos de inversión registrados (CNMV/ESMA).
+      No aplica a ETFs, acciones ni planes de pensiones.
+    """
+    try:
+        client = get_portfolio_client()
+        items = await client.core.traspaso_analysis()
+        return [TraspasoFundItem(**item) for item in items]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error en análisis de traspasos: {exc}") from exc
 
 
 @router.get("/fund/search", response_model=List[FundSearchResult])
@@ -340,23 +396,74 @@ async def fund_search(q: str = "", limit: int = 20):
     if len(q.strip()) < 2:
         return []
 
-    results = search_funds(q, limit=limit)
+    results = await search_funds_async(q, limit=limit)
 
     return [
         FundSearchResult(
             isin=r["isin"],
             name=r.get("name", ""),
             in_portfolio=r.get("in_portfolio", False),
+            url=r.get("url"),
         )
         for r in results
     ]
 
 
 @router.get("/fund/{isin}/details", response_model=FundDetailResponse)
-async def get_fund_detail(isin: str):
-    """Detalle completo de un fondo: info, métricas, sectores, países, holdings."""
-    detail = get_fund_detail_full_cached(isin)
+async def get_fund_detail(isin: str, refresh: bool = False):
+    """Detalle completo de un fondo: info, métricas, sectores, países, holdings.
+
+    Usa caché en disco (7 días) + memoria (1 h) para respuestas rápidas después de la primera carga.
+    Pasa ?refresh=true para ignorar la caché y forzar re-descarga.
+    """
+    import json as _json
+    import os as _os
+
+    disk_path = CACHE_DIR / f"fund_detail_{isin}.json"
+    now = __import__("time").time()
+    _DISK_TTL = 86400 * 7  # 7 días
+
+    if not refresh and disk_path.exists() and (now - disk_path.stat().st_mtime) < _DISK_TTL:
+        try:
+            with open(disk_path, "r", encoding="utf-8") as f:
+                detail = _json.load(f)
+            return FundDetailResponse(**detail)
+        except Exception:
+            pass  # corrupt cache, re-fetch
+
+    # 2. Fetch async
+    detail = await _get_fund_detail_async(isin)
+    try:
+        with open(disk_path, "w", encoding="utf-8") as f:
+            _json.dump(detail, f, ensure_ascii=False, default=str)
+    except Exception:
+        pass
     return FundDetailResponse(**detail)
+
+
+@router.get("/fund/{isin}/nav_history")
+async def get_fund_nav_history(isin: str, years: int = 10):
+    """Devuelve el histórico de precios NAV para cualquier ISIN (incluso fuera de cartera).
+
+    Respuesta: lista de ``{date: str, price: float}``.
+    Útil para añadir fondos externos a la pestaña de Evolución/Comparativa.
+    """
+    try:
+        client = get_portfolio_client()
+        df = await client.provider.get_nav_history(isin, years=years)
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail=f"Sin datos NAV para {isin}")
+        # Normalize column names: may be 'date'/'price' or index-based
+        df = df.reset_index(drop=True)
+        if "date" not in df.columns or "price" not in df.columns:
+            raise HTTPException(status_code=500, detail="Formato inesperado de HistóricoNAV")
+        df = df.dropna(subset=["price"])
+        df["date"] = df["date"].astype(str)
+        return df[["date", "price"]].to_dict(orient="records")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo histórico: {exc}") from exc
 
 
 @router.post("/simulate", response_model=SimulationResponse)
@@ -365,8 +472,36 @@ async def simulate_fund_addition(request: SimulationRequest):
 
     Permite fondos que ya están en cartera o fondos nuevos de Finect.
     """
-    result = simulate_addition(request.isin, request.amount)
-    return SimulationResponse(**result)
+    try:
+        client = get_portfolio_client()
+        result = await client.core.simulate_addition(request.isin, request.amount)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error en simulación: {exc}") from exc
+
+    funds = [
+        {
+            "isin": row["ISIN"],
+            "name": row["Fondo"],
+            "current_weight": row.get("Peso_Actual", 0.0),
+            "simulated_weight": row.get("Peso_Simulado", 0.0),
+        }
+        for row in result["weights"].to_dict(orient="records")
+    ]
+
+    return SimulationResponse(
+        added_isin=request.isin,
+        added_name=result["metadata"]["added_name"],
+        added_amount=request.amount,
+        current_total=result["metadata"]["current_total"],
+        simulated_total=result["metadata"]["simulated_total"],
+        funds=funds,
+        current_portfolio_metrics=result.get("current_portfolio_metrics", {}),
+        simulated_portfolio_metrics=result.get("simulated_portfolio_metrics", {}),
+        history_current=result.get("history_current", []),
+        history_fund=result.get("history_fund", []),
+        history_simulated=result.get("history_simulated", []),
+        period_returns=result.get("period_returns", []),
+    )
 
 
 @router.get("/performance")

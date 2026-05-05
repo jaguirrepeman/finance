@@ -14,7 +14,7 @@ Uso indirecto (notebooks via sync facade):
 
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -348,7 +348,8 @@ class AsyncPortfolioCore:
 
     async def tax_optimize(self, target_amount: float) -> pd.DataFrame:
         """Plan de retirada fiscal óptimo."""
-        prices = await self.provider.get_nav_batch(list(self.portfolio.positions.keys()))
+        isins = list(self.portfolio.positions.keys())
+        prices = await self.provider.get_nav_batch(isins)
         optimizer = TaxOptimizer(self.portfolio, prices=prices)
         plan = optimizer.optimize_withdrawal(target_amount)
 
@@ -360,6 +361,37 @@ class AsyncPortfolioCore:
             ])
 
         df = pd.DataFrame(rows)
+
+        # ── Enriquecer nombres de fondo ──────────────────────────────────────
+        import re as _re
+        _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+        mov = self.portfolio.movements
+        name_from_mov: Dict[str, str] = {}
+        if not mov.empty and "Fondo" in mov.columns:
+            name_from_mov = (
+                mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
+                .groupby("ISIN")["Fondo"]
+                .first()
+                .to_dict()
+            )
+
+        isins_need_name = [
+            isin for isin in isins
+            if not (name_from_mov.get(isin) and not _ISIN_RE.match(name_from_mov[isin].strip()))
+        ]
+        resolved: Dict[str, str] = {}
+        if isins_need_name:
+            resolved = await self.provider.resolve_names_batch(isins_need_name)
+
+        def _name(isin: str) -> str:
+            n = name_from_mov.get(isin, "")
+            if n and not _ISIN_RE.match(n.strip()):
+                return n
+            return resolved.get(isin, isin)
+
+        df["Fondo"] = df["ISIN"].map(_name)
+        # ────────────────────────────────────────────────────────────────────
+
         totals = pd.DataFrame([{
             "ISIN": "── TOTAL ──",
             "Fondo": "",
@@ -376,6 +408,114 @@ class AsyncPortfolioCore:
         df.attrs["estimated_tax"] = plan["estimated_tax"]
         df.attrs["net_amount"] = plan["net_amount"]
         return df
+
+    async def traspaso_analysis(self) -> List[Dict[str, Any]]:
+        """
+        Análisis de optimización mediante traspasos entre fondos de inversión.
+
+        Los traspasos entre fondos de inversión (IICs) están regulados en el
+        Art. 94 Ley 35/2006 del IRPF: el reembolso e inmediata suscripción en otro
+        fondo de inversión no tributa; la plusvalía latente se difiere hasta la
+        venta definitiva. No aplica a ETFs, acciones ni planes de pensiones.
+
+        Returns:
+            Lista de dicts por ISIN con:
+                isin, nombre, valor_actual, capital_invertido,
+                plusvalia_latente, plusvalia_pct,
+                impuesto_si_vendes, ahorro_traspaso,
+                num_lotes, cualifica_traspaso
+        """
+        isins = list(self.portfolio.positions.keys())
+        if not isins:
+            return []
+
+        prices = await self.provider.get_nav_batch(isins)
+
+        # Resolver nombres
+        import re as _re
+        _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+        mov = self.portfolio.movements
+        name_from_mov: Dict[str, str] = {}
+        if not mov.empty and "Fondo" in mov.columns:
+            name_from_mov = (
+                mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
+                .groupby("ISIN")["Fondo"]
+                .first()
+                .to_dict()
+            )
+        isins_need_name = [
+            i for i in isins
+            if not (name_from_mov.get(i) and not _ISIN_RE.match(name_from_mov[i].strip()))
+        ]
+        resolved: Dict[str, str] = {}
+        if isins_need_name:
+            resolved = await self.provider.resolve_names_batch(isins_need_name)
+
+        def _name(isin: str) -> str:
+            n = name_from_mov.get(isin, "")
+            if n and not _ISIN_RE.match(n.strip()):
+                return n
+            return resolved.get(isin, isin)
+
+        # Tramos IRPF ahorro 2024 (Ley 26/2014 + PGE 2023)
+        def _tax(ganancia: float) -> float:
+            if ganancia <= 0:
+                return 0.0
+            tramos = [(6000, 0.19), (44000, 0.21), (150000, 0.23), (100000, 0.27), (float("inf"), 0.28)]
+            tax = 0.0
+            acum = 0.0
+            for limite, tipo in tramos:
+                tramo = min(ganancia - acum, limite)
+                if tramo <= 0:
+                    break
+                tax += tramo * tipo
+                acum += tramo
+            return round(tax, 2)
+
+        # Agrupar lotes abiertos por ISIN
+        lots_by_isin: Dict[str, list] = {}
+        for lot in self.portfolio.open_lots:
+            lots_by_isin.setdefault(lot["ISIN"], []).append(lot)
+
+        result = []
+        for isin in isins:
+            lots = lots_by_isin.get(isin, [])
+            if not lots:
+                continue
+            price = prices.get(isin, 0.0)
+            if not price:
+                continue
+
+            capital_invertido = sum(
+                l["Precio_Compra_Unitario"] * l["Participaciones_Restantes"] for l in lots
+            )
+            valor_actual = sum(l["Participaciones_Restantes"] for l in lots) * price
+            plusvalia = valor_actual - capital_invertido
+            plusvalia_pct = (plusvalia / capital_invertido * 100) if capital_invertido > 0 else 0.0
+            impuesto = _tax(plusvalia) if plusvalia > 0 else 0.0
+
+            # Los fondos de inversión registrados en la CNMV / ESMA cualifican para traspaso.
+            # Como heurística conservadora asumimos que todos los fondos de la cartera
+            # son IICs (fondos de inversión / SICAV), no ETFs.
+            # El usuario debe verificar que no hay ETFs o acciones en cartera.
+            cualifica = True  # Asumir IIC hasta que se implemente clasificación automática
+
+            result.append({
+                "isin": isin,
+                "nombre": _name(isin),
+                "valor_actual": round(valor_actual, 2),
+                "capital_invertido": round(capital_invertido, 2),
+                "plusvalia_latente": round(plusvalia, 2),
+                "plusvalia_pct": round(plusvalia_pct, 2),
+                "impuesto_si_vendes": round(impuesto, 2),
+                "ahorro_traspaso": round(impuesto, 2),  # = 0 si plusvalía < 0
+                "num_lotes": len(lots),
+                "cualifica_traspaso": cualifica,
+            })
+
+        # Ordenar: primero los que más ahorro generan
+        result.sort(key=lambda x: x["ahorro_traspaso"], reverse=True)
+        return result
 
     # ------------------------------------------------------------------
     # Performance
@@ -732,54 +872,360 @@ class AsyncPortfolioCore:
         results = await asyncio.gather(*tasks)
         return pd.DataFrame(results).sort_values("Puntos_NAV").reset_index(drop=True)
 
+    @staticmethod
+    def _normalize_price_history(df: pd.DataFrame) -> pd.DataFrame:
+        """Limpia un histórico de NAV para cálculos posteriores."""
+        if df is None or df.empty or "date" not in df.columns or "price" not in df.columns:
+            return pd.DataFrame(columns=["date", "price"])
+
+        hist = df[["date", "price"]].copy()
+        hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
+        hist["price"] = pd.to_numeric(hist["price"], errors="coerce")
+        hist = hist.dropna(subset=["date", "price"])
+        hist = hist.loc[hist["price"] > 0].sort_values("date").drop_duplicates("date")
+        return hist.reset_index(drop=True)
+
+    @staticmethod
+    def _series_to_points(series: pd.Series) -> List[Dict[str, Any]]:
+        """Convierte una serie temporal en la shape esperada por el frontend."""
+        if series is None or series.empty:
+            return []
+
+        clean = series.dropna().sort_index()
+        return [
+            {
+                "date": idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx),
+                "price": round(float(value), 6),
+            }
+            for idx, value in clean.items()
+            if pd.notna(value)
+        ]
+
+    @staticmethod
+    def _build_weighted_portfolio_series(
+        price_df: pd.DataFrame,
+        weights: Dict[str, float],
+    ) -> pd.Series:
+        """Construye una serie sintética de cartera usando pesos estáticos."""
+        if price_df.empty or not weights:
+            return pd.Series(dtype=float)
+
+        valid_cols = [
+            col for col in price_df.columns
+            if col in weights and price_df[col].dropna().shape[0] >= 10
+        ]
+        if not valid_cols:
+            valid_cols = [col for col in price_df.columns if col in weights]
+        if not valid_cols:
+            return pd.Series(dtype=float)
+
+        prices = price_df[valid_cols].sort_index().ffill()
+        if prices.empty:
+            return pd.Series(dtype=float)
+
+        daily_returns = prices.pct_change().dropna(how="all")
+        if daily_returns.empty:
+            first_col = prices[valid_cols[0]].dropna()
+            if first_col.shape[0] < 2:
+                return pd.Series(dtype=float)
+            return (first_col / float(first_col.iloc[0])) * 100.0
+
+        weight_vec = pd.Series(
+            {col: float(weights.get(col, 0.0)) for col in valid_cols},
+            dtype=float,
+        )
+        if weight_vec.sum() <= 0:
+            weight_vec = pd.Series(1.0 / len(valid_cols), index=valid_cols, dtype=float)
+        else:
+            weight_vec = weight_vec / weight_vec.sum()
+
+        period_weights = daily_returns.notna().mul(weight_vec, axis=1)
+        period_weight_sum = period_weights.sum(axis=1).replace(0, np.nan)
+        portfolio_return = (
+            daily_returns.fillna(0)
+            .mul(period_weights)
+            .sum(axis=1)
+            .div(period_weight_sum)
+            .fillna(0)
+        )
+        return (1 + portfolio_return).cumprod() * 100.0
+
+    @staticmethod
+    def _compute_series_metrics(
+        series: pd.Series,
+        risk_free_annual: float = 0.03,
+    ) -> Dict[str, Optional[float]]:
+        """Calcula métricas de riesgo/rentabilidad desde una serie histórica."""
+        if series is None:
+            return {}
+
+        clean = series.dropna().sort_index()
+        if clean.shape[0] < 5:
+            return {}
+
+        first = float(clean.iloc[0])
+        last = float(clean.iloc[-1])
+        if first <= 0 or last <= 0:
+            return {}
+
+        total_return = (last / first - 1) * 100
+        total_days = max((clean.index[-1] - clean.index[0]).days, 1)
+        annualized_return = ((last / first) ** (365.25 / total_days) - 1) * 100
+
+        log_returns = np.log(clean / clean.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+        pct_returns = clean.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+
+        standard_deviation: Optional[float] = None
+        sharpe_ratio: Optional[float] = None
+        if log_returns.shape[0] >= 10:
+            standard_deviation = float(log_returns.std(ddof=0) * np.sqrt(252) * 100)
+
+        if pct_returns.shape[0] >= 10:
+            rf_daily = (1 + risk_free_annual) ** (1 / 252) - 1
+            pct_std = float(pct_returns.std(ddof=0))
+            if pct_std > 0:
+                sharpe_ratio = float(
+                    ((float(pct_returns.mean()) - rf_daily) / pct_std) * np.sqrt(252)
+                )
+
+        drawdown = (clean / clean.cummax()) - 1
+        max_drawdown = float(drawdown.min() * 100) if not drawdown.empty else None
+
+        return {
+            "total_return": round(total_return, 2),
+            "annualized_return": round(annualized_return, 2),
+            "standard_deviation": (
+                round(standard_deviation, 2) if standard_deviation is not None else None
+            ),
+            "sharpe_ratio": round(sharpe_ratio, 3) if sharpe_ratio is not None else None,
+            "max_drawdown": round(max_drawdown, 2) if max_drawdown is not None else None,
+        }
+
+    @classmethod
+    def _build_period_returns(
+        cls,
+        current_series: pd.Series,
+        fund_series: pd.Series,
+        simulated_series: pd.Series,
+    ) -> List[Dict[str, Any]]:
+        """Construye comparativa de rentabilidades por período."""
+
+        def _calc_period_return(
+            series: pd.Series,
+            timeframe: str,
+            annualized: bool,
+        ) -> Optional[float]:
+            clean = series.dropna().sort_index() if series is not None else pd.Series(dtype=float)
+            if clean.shape[0] < 2:
+                return None
+
+            end = clean.index[-1]
+            if timeframe == "MAX":
+                window = clean
+            else:
+                start = pd.Timestamp(end)
+                if timeframe == "1M":
+                    start = start - pd.DateOffset(months=1)
+                elif timeframe == "3M":
+                    start = start - pd.DateOffset(months=3)
+                elif timeframe == "YTD":
+                    start = pd.Timestamp(year=end.year, month=1, day=1)
+                elif timeframe == "1Y":
+                    start = start - pd.DateOffset(years=1)
+                elif timeframe == "3Y":
+                    start = start - pd.DateOffset(years=3)
+                elif timeframe == "5Y":
+                    start = start - pd.DateOffset(years=5)
+                elif timeframe == "10Y":
+                    start = start - pd.DateOffset(years=10)
+                else:
+                    return None
+                window = clean.loc[clean.index >= start]
+
+            if window.shape[0] < 2:
+                return None
+
+            first = float(window.iloc[0])
+            last = float(window.iloc[-1])
+            if first <= 0 or last <= 0:
+                return None
+
+            total_return = (last / first - 1) * 100
+            if not annualized:
+                return round(total_return, 2)
+
+            days = max((window.index[-1] - window.index[0]).days, 1)
+            annualized_return = ((last / first) ** (365.25 / days) - 1) * 100
+            return round(annualized_return, 2)
+
+        periods = [
+            ("1 Mes", "1M", False),
+            ("3 Meses", "3M", False),
+            ("YTD", "YTD", False),
+            ("1 Año", "1Y", True),
+            ("3 Años", "3Y", True),
+            ("5 Años", "5Y", True),
+            ("10 Años", "10Y", True),
+            ("Máx.", "MAX", True),
+        ]
+
+        rows: List[Dict[str, Any]] = []
+        for label, timeframe, annualized in periods:
+            current_value = _calc_period_return(current_series, timeframe, annualized)
+            fund_value = _calc_period_return(fund_series, timeframe, annualized)
+            simulated_value = _calc_period_return(simulated_series, timeframe, annualized)
+            if current_value is None and fund_value is None and simulated_value is None:
+                continue
+            rows.append({
+                "label": label,
+                "current": current_value,
+                "fund": fund_value,
+                "simulated": simulated_value,
+            })
+
+        return rows
+
     # ------------------------------------------------------------------
     # Simulate Addition
     # ------------------------------------------------------------------
 
     async def simulate_addition(self, isin: str, amount: float) -> Dict[str, pd.DataFrame]:
-        """Simula incorporar amount € en el fondo isin."""
-        # Get current positions
-        pos = await self.positions(live=True)
-        total_val = pos["Valor_Actual"].sum() if not pos.empty else 0
+        """Simula incorporar ``amount`` € en el fondo ``isin``."""
+        import asyncio
 
-        # Get NAV del nuevo fondo
-        nav = await self.provider.get_nav(isin)
+        def _value_or_zero(value: Any) -> float:
+            if value is None or pd.isna(value):
+                return 0.0
+            return float(value)
+
+        pos = await self.positions(live=True)
+        value_col = "Valor_Actual"
+        if pos.empty or not pos["Valor_Actual"].notna().any():
+            value_col = "Capital_Invertido"
+
+        total_val = _value_or_zero(pos[value_col].sum()) if not pos.empty else 0.0
+
         info = await self.provider.get_fund_info(isin) or {}
-        added_name = info.get("name", isin)
+        existing_name_map = {}
+        if not pos.empty:
+            existing_name_map = {
+                str(row["ISIN"]): str(row.get("Fondo") or row["ISIN"])
+                for _, row in pos.iterrows()
+            }
+
+        added_name = existing_name_map.get(isin) or info.get("name", isin)
+        requested_added_name = added_name
 
         simulated_total = total_val + amount
 
-        # Weights
         weight_rows = []
+        current_values: Dict[str, float] = {}
         for _, row in pos.iterrows():
-            cur_w = (row["Valor_Actual"] / total_val * 100) if total_val > 0 else 0
-            sim_w = (row["Valor_Actual"] / simulated_total * 100) if simulated_total > 0 else 0
+            row_isin = str(row["ISIN"])
+            row_name = existing_name_map.get(row_isin, row_isin)
+            current_value = _value_or_zero(row.get(value_col, 0.0))
+            simulated_value = current_value + (amount if row_isin == isin else 0.0)
+            current_values[row_name] = current_values.get(row_name, 0.0) + current_value
+            cur_w = (current_value / total_val * 100) if total_val > 0 else 0.0
+            sim_w = (simulated_value / simulated_total * 100) if simulated_total > 0 else 0.0
             weight_rows.append({
-                "ISIN": row["ISIN"], "Fondo": row["Fondo"],
-                "Peso_Actual": round(cur_w, 2), "Peso_Simulado": round(sim_w, 2),
+                "ISIN": row_isin,
+                "Fondo": row_name,
+                "Peso_Actual": round(cur_w, 2),
+                "Peso_Simulado": round(sim_w, 2),
             })
 
-        # El nuevo fondo
-        added_current = 0.0
         existing = [r for r in weight_rows if r["ISIN"] == isin]
         if existing:
-            existing[0]["Peso_Simulado"] = round(
-                (existing[0]["Peso_Actual"] / 100 * total_val + amount) / simulated_total * 100, 2
-            )
+            current_values[added_name] = current_values.get(added_name, 0.0)
         else:
             weight_rows.append({
-                "ISIN": isin, "Fondo": added_name,
-                "Peso_Actual": 0.0, "Peso_Simulado": round(amount / simulated_total * 100, 2),
+                "ISIN": isin,
+                "Fondo": added_name,
+                "Peso_Actual": 0.0,
+                "Peso_Simulado": round(amount / simulated_total * 100, 2),
             })
+
+        simulated_values = dict(current_values)
+        simulated_values[added_name] = simulated_values.get(added_name, 0.0) + amount
 
         df_weights = pd.DataFrame(weight_rows).sort_values("Peso_Simulado", ascending=False).reset_index(drop=True)
 
+        history_isins = list(dict.fromkeys([*existing_name_map.keys(), isin]))
+
+        async def _fetch_history(target_isin: str) -> tuple[str, str, pd.Series]:
+            history_df = await self.provider.get_nav_history(target_isin, years=15)
+            clean_history = self._normalize_price_history(history_df)
+
+            display_name = existing_name_map.get(target_isin)
+            if not display_name:
+                if target_isin == isin:
+                    display_name = added_name
+                else:
+                    target_info = await self.provider.get_fund_info(target_isin) or {}
+                    display_name = target_info.get("name", target_isin)
+
+            if clean_history.empty:
+                return target_isin, display_name, pd.Series(dtype=float)
+
+            series = clean_history.set_index("date")["price"].rename(display_name)
+            return target_isin, display_name, series
+
+        fetched_history = await asyncio.gather(*[_fetch_history(target_isin) for target_isin in history_isins])
+
+        price_series: Dict[str, pd.Series] = {}
+        history_name_by_isin: Dict[str, str] = {}
+        for target_isin, display_name, series in fetched_history:
+            history_name_by_isin[target_isin] = display_name
+            if series.empty:
+                continue
+            current_best = price_series.get(display_name)
+            if current_best is None or series.dropna().shape[0] > current_best.dropna().shape[0]:
+                price_series[display_name] = series
+
+        added_name = history_name_by_isin.get(isin, added_name)
+        if added_name != requested_added_name:
+            if requested_added_name in current_values:
+                current_values[added_name] = current_values.get(added_name, 0.0) + current_values.pop(requested_added_name)
+            if requested_added_name in simulated_values:
+                simulated_values[added_name] = simulated_values.get(added_name, 0.0) + simulated_values.pop(requested_added_name)
+            df_weights.loc[df_weights["ISIN"] == isin, "Fondo"] = added_name
+        elif added_name in current_values or isin in existing_name_map:
+            current_values[added_name] = current_values.get(added_name, 0.0)
+
+        price_df = pd.concat(price_series.values(), axis=1, join="outer").sort_index() if price_series else pd.DataFrame()
+
+        current_weights = {
+            name: value / total_val
+            for name, value in current_values.items()
+            if total_val > 0 and value > 0
+        }
+        simulated_weights = {
+            name: value / simulated_total
+            for name, value in simulated_values.items()
+            if simulated_total > 0 and value > 0
+        }
+
+        current_series = self._build_weighted_portfolio_series(price_df, current_weights)
+        fund_series = price_series.get(added_name, pd.Series(dtype=float))
+        simulated_series = self._build_weighted_portfolio_series(price_df, simulated_weights)
+
+        current_portfolio_metrics = self._compute_series_metrics(current_series)
+        simulated_portfolio_metrics = self._compute_series_metrics(simulated_series)
+        period_returns = self._build_period_returns(current_series, fund_series, simulated_series)
+
         return {
             "weights": df_weights,
-            "metrics": pd.DataFrame(),  # TODO: compute portfolio metrics
+            "metrics": pd.DataFrame(),
             "metadata": {
                 "added_name": added_name,
                 "current_total": total_val,
                 "simulated_total": simulated_total,
             },
+            "current_portfolio_metrics": current_portfolio_metrics,
+            "simulated_portfolio_metrics": simulated_portfolio_metrics,
+            "history_current": self._series_to_points(current_series),
+            "history_fund": self._series_to_points(fund_series),
+            "history_simulated": self._series_to_points(simulated_series),
+            "period_returns": period_returns,
         }
