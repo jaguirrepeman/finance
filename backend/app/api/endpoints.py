@@ -21,19 +21,30 @@ from ..schemas.portfolio import (
     TaxOptimizeResponse,
     TaxPlanStep,
     FundDetailResponse,
+    FundSearchResult,
+    SimulationRequest,
+    SimulationResponse,
 )
 from ..services.portfolio_service import (
     CACHE_DIR,
     EXCEL_PATH,
+    TSV_PATH,
     load_json,
     build_summary,
     build_details,
     build_history_batch,
     build_correlation,
     run_analytics_pipeline,
+    run_nav_pipeline,
+    run_details_pipeline,
+    build_msci_world_benchmark,
     get_portfolio_client,
+    get_fund_detail_full_cached,
     reset_client,
     safe_float,
+    search_funds,
+    get_fund_detail_full,
+    simulate_addition,
 )
 
 router = APIRouter()
@@ -82,6 +93,58 @@ async def get_enriched_portfolio(background_tasks: BackgroundTasks):
         }
     }
     return cached
+
+
+@router.get("/refresh-nav", response_model=AnalysisResponse)
+async def refresh_nav(background_tasks: BackgroundTasks):
+    """Recalcula solo cotizaciones (NAVs), histórico y correlaciones.
+
+    Más rápido que /enrich ya que no descarga sectores/regiones.
+    """
+    background_tasks.add_task(run_nav_pipeline, force_download=True)
+
+    cached = load_json("summary.json")
+    if not cached:
+        try:
+            cached = build_summary()
+        except Exception:
+            cached = {
+                "summary": {"total_rv": 0, "total_rf": 0, "total_cash": 0, "total_alt": 0, "details": {}},
+                "funds": [],
+                "recommendation": {},
+            }
+
+    cached["recommendation"] = {
+        "rf_sug": {
+            "title": "Actualizando Cotizaciones",
+            "text": "Recalculando NAVs, histórico y correlaciones. Refresca en unos segundos.",
+        }
+    }
+    return cached
+
+
+@router.get("/refresh-details")
+async def refresh_details(background_tasks: BackgroundTasks):
+    """Recalcula solo los detalles (sectores, regiones, métricas de riesgo).
+
+    Más lento que /refresh-nav ya que consulta Finect, FT, etc.
+    """
+    background_tasks.add_task(run_details_pipeline, force_download=True)
+
+    cached = load_json("details.json")
+    return cached or {}
+
+
+@router.get("/benchmark/msci-world")
+async def get_msci_world_benchmark():
+    """Pesos sectoriales y geográficos del MSCI World (iShares ETF proxy)."""
+    cached = load_json("benchmark_msci.json")
+    if cached:
+        return cached
+    try:
+        return build_msci_world_benchmark()
+    except Exception as e:
+        return {"sectors": {}, "regions": {}, "error": str(e)}
 
 
 @router.get("/history_batch")
@@ -254,32 +317,42 @@ async def tax_optimize(request: TaxOptimizeRequest):
     )
 
 
+@router.get("/fund/search", response_model=List[FundSearchResult])
+async def fund_search(q: str = "", limit: int = 20):
+    """Busca fondos en el índice de Finect (por ISIN o nombre).
+
+    Permite encontrar fondos que no están en cartera para simular su adición.
+    """
+    if len(q.strip()) < 2:
+        return []
+
+    results = search_funds(q, limit=limit)
+
+    return [
+        FundSearchResult(
+            isin=r["isin"],
+            name=r.get("name", ""),
+            in_portfolio=r.get("in_portfolio", False),
+        )
+        for r in results
+    ]
+
+
 @router.get("/fund/{isin}/details", response_model=FundDetailResponse)
 async def get_fund_detail(isin: str):
-    """Detalle completo de un fondo: info, sectores, países, holdings."""
-    client = get_portfolio_client()
-    provider = client.provider
+    """Detalle completo de un fondo: info, métricas, sectores, países, holdings."""
+    detail = get_fund_detail_full_cached(isin)
+    return FundDetailResponse(**detail)
 
-    info = provider.get_fund_info(isin) or {}
-    sectors = provider.get_sector_weights(isin) or {}
-    countries = provider.get_country_weights(isin) or {}
-    holdings_df = provider.get_holdings(isin)
 
-    holdings = holdings_df.to_dict("records") if not holdings_df.empty else []
+@router.post("/simulate", response_model=SimulationResponse)
+async def simulate_fund_addition(request: SimulationRequest):
+    """Simula añadir Y€ a un fondo y devuelve las métricas resultantes.
 
-    return FundDetailResponse(
-        isin=isin,
-        name=info.get("name", isin),
-        expense_ratio=info.get("expense_ratio"),
-        aum=info.get("aum"),
-        inception_date=info.get("inception_date"),
-        rating=info.get("overallMorningstarRating"),
-        risk_score=info.get("riskScore"),
-        sectors={k: safe_float(v) for k, v in sectors.items()},
-        countries={k: safe_float(v) for k, v in countries.items()},
-        holdings=holdings,
-        source=info.get("source", ""),
-    )
+    Permite fondos que ya están en cartera o fondos nuevos de Finect.
+    """
+    result = simulate_addition(request.isin, request.amount)
+    return SimulationResponse(**result)
 
 
 @router.get("/performance")
@@ -292,15 +365,54 @@ async def get_performance():
     return {"metrics": df.to_dict("records")}
 
 
+@router.get("/evolution-metrics")
+async def get_evolution_metrics(
+    years: int = 5,
+    risk_free: float = 0.03,
+    benchmark_isin: str | None = None,
+):
+    """Métricas de evolución por fondo calculadas desde el historial de NAV.
+
+    Devuelve Rentabilidad Total, CAGR, Volatilidad Anualizada, Sharpe,
+    Alpha (anualizado) y Beta respecto al benchmark indicado.
+    Los fondos se ordenan por peso en cartera descendente.
+
+    Query params:
+        years: ventana historica en años (default 5).
+        risk_free: tasa libre de riesgo anual para Sharpe (default 0.03).
+        benchmark_isin: ISIN del benchmark; si se omite se usa la serie
+            de cartera agregada o el fondo de mayor peso.
+    """
+    _client = get_portfolio_client()
+    df = _client.evolution_metrics(
+        years=years,
+        risk_free_annual=risk_free,
+        benchmark_isin=benchmark_isin,
+    )
+    if df.empty:
+        return {"funds": [], "benchmark": None, "years": years}
+    return {
+        "funds": df.to_dict("records"),
+        "benchmark": df.attrs.get("benchmark"),
+        "years": years,
+        "risk_free_annual": risk_free,
+    }
+
+
 @router.post("/upload-orders")
 async def upload_orders(file: UploadFile = File(...)):
-    """Sube un nuevo Excel de órdenes y recalcula todo."""
-    if not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .xlsx o .xls")
+    """Sube el fichero de órdenes (TSV del broker o Excel) y recalcula todo."""
+    fname = file.filename or ""
+    if fname.endswith(".tsv"):
+        dest = TSV_PATH
+    elif fname.endswith((".xlsx", ".xls")):
+        dest = EXCEL_PATH
+    else:
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .tsv, .xlsx o .xls")
 
     # Guardar archivo
     try:
-        with open(EXCEL_PATH, "wb") as f:
+        with open(dest, "wb") as f:
             content = await file.read()
             f.write(content)
     except Exception as e:
@@ -311,8 +423,8 @@ async def upload_orders(file: UploadFile = File(...)):
     try:
         run_analytics_pipeline(force_download=True)
     except Exception as e:
-        return {"message": f"⚠️ Excel guardado pero hubo un error al procesar: {e}"}
+        return {"message": f"⚠️ Fichero guardado pero hubo un error al procesar: {e}"}
 
-    return {"message": "✅ Excel de órdenes actualizado y portfolio recalculado."}
+    return {"message": f"✅ Fichero de órdenes ({fname}) actualizado y portfolio recalculado."}
 
 

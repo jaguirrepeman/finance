@@ -89,3 +89,40 @@ Key rules:
 - Use `from module import *`.
 - Put production logic in notebooks.
 - Leave `print()` statements in committed code.
+
+## 11. Notebook / App Contract (Portfolio Tracker)
+
+This project follows a **thin-notebook / thick-backend** pattern:
+
+```
+  FastAPI backend (app/)          ← toda la lógica de negocio
+       │
+  PortfolioClient (client.py)     ← fachada Python; todos los métodos devuelven DataFrame
+       │
+  Notebooks (notebooks/*.ipynb)   ← sugar sintáctico sobre PortfolioClient; solo viz/exploración
+```
+
+### Reglas de oro
+
+1. **Toda lógica de cálculo (métricas, transformaciones, filtros) vive en `app/`.**  
+   Los notebooks solo llaman métodos de `PortfolioClient` y renderizan resultados.
+
+2. **Cada método de `PortfolioClient` tiene su endpoint equivalente en `endpoints.py`.**  
+   Si añades `client.foo()` también debes añadir `GET /api/foo`.
+
+3. **Los notebooks son la "demo interactiva" del API**, no una copia.  
+   El código del notebook debe verse así:
+   ```python
+   df = client.evolution_metrics(years=5)   # toda la lógica en client.py
+   # … solo visualización a partir de aquí …
+   ```
+
+4. **Cuando el notebook muestre comportamiento nuevo** (p. ej. una nueva columna,  
+   un nuevo orden, un nuevo cálculo), **ese comportamiento debe reflejarse primero  
+   en `client.py` / `endpoints.py`** y el notebook simplemente consumirlo.
+
+5. **Nunca duplicar lógica de negocio** entre el notebook y el backend:  
+   DRY se aplica también entre capas.
+
+6. **Orden de desarrollo preferido:**  
+   `services/` → `client.py` → `endpoints.py` → `notebook` (visualización).

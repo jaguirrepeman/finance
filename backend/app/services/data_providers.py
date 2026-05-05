@@ -9,17 +9,20 @@ Proveedores soportados:
   - CompositeProvider: Estrategia dual — velocidad (NAV) vs completitud (datos)
 
 Estrategia de adquisición de datos:
-  1. **NAV / Histórico** (prioridad: velocidad ⚡)
-     Cadena: FMP → YFinance → MorningStar(light)
-     - FMP: ~300ms, 1 HTTP call, no deps externas, falla rápido si no resuelve
-     - YFinance: ~500ms, sin API key, buena cobertura ISINs europeos
-     - MorningStar: ~2-5s, backup cuando los otros fallan (usa caché)
+  1. **NAV / Precio actual** (prioridad: velocidad + frescura ⚡)
+     Cadena: Finect → YFinance → FMP → MorningStar(light)
+     - Finect: ~500ms, 1 HTTP + parse JSON, devuelve NAV + fecha exacta
+     - YFinance: ~300ms, period=5d, buena cobertura ISINs europeos
+     - FMP: ~300ms (si hay API key), 1 HTTP call
+     - MorningStar: ~2-5s, backup de último recurso
+     Early termination: si un proveedor devuelve NAV con fecha ≤ 3 días, se acepta.
 
-  2. **Info / Sectores / Países / Holdings** (prioridad: completitud 📊)
-     Cadena: MorningStar(detailed) → FMP → Finect
-     - MorningStar: fuente más rica (ratings, sectores, regiones, holdings, risk)
-     - FMP: excelente para ETFs (sector/country/holdings weightings)
-     - Finect: complementa con comisiones, gestora, categoría, benchmark
+  2. **Histórico de precios** (prioridad: completitud)
+     Cadena: YFinance → FMP → MorningStar(light)
+     First-success: devuelve el primer resultado no vacío.
+
+  3. **Info / Sectores / Países / Holdings** (prioridad: completitud 📊)
+     Cadena: Finect → FT → YFinance → FMP
      Para info: se fusionan TODOS los proveedores (primer valor no-nulo gana)
      Para sectores/países/holdings: se fusionan priorizando el proveedor más completo
 
@@ -68,6 +71,10 @@ class FundDataProvider(ABC):
     @abstractmethod
     def get_nav(self, isin: str) -> Optional[float]:
         """Precio actual (NAV)."""
+
+    def get_nav_date(self, isin: str) -> Optional[str]:
+        """Fecha del último dato NAV disponible (YYYY-MM-DD). None si no disponible."""
+        return None
 
     @abstractmethod
     def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
@@ -311,6 +318,32 @@ class MStarProvider(FundDataProvider):
             logger.warning("MStarProvider.get_nav(%s) failed: %s", isin, e)
             return None
 
+    def get_nav_date(self, isin: str) -> Optional[str]:
+        """Última fecha de NAV disponible en el histórico cacheado."""
+        try:
+            fund = self._get_fund(isin, mode="light")
+            df = fund.fund_data
+            if df is None or df.empty:
+                return None
+            # Intentar extraer del histórico (columna historical_data)
+            if "historical_data" in df.columns:
+                hist = df["historical_data"].iloc[0]
+                if isinstance(hist, pd.DataFrame) and not hist.empty:
+                    last_idx = hist.index[-1]
+                    try:
+                        return last_idx.date().isoformat()
+                    except AttributeError:
+                        return str(last_idx)[:10]
+            # Fallback: fecha_actualizacion en data_col
+            data_col = df["data"].iloc[0]
+            if isinstance(data_col, pd.DataFrame) and "fecha_actualizacion" in data_col.columns:
+                val = data_col["fecha_actualizacion"].iloc[0]
+                if pd.notna(val):
+                    return str(val)[:10]
+        except Exception as e:
+            logger.debug("MStarProvider.get_nav_date(%s) failed: %s", isin, e)
+        return None
+
     def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
         try:
             fund = self._get_fund(isin, mode="light")
@@ -490,16 +523,28 @@ class YFinanceProvider(FundDataProvider):
     entre velocidad y cobertura de ISINs europeos.
     """
 
+    def __init__(self):
+        self._last_nav_dates: Dict[str, str] = {}
+
     def get_nav(self, isin: str) -> Optional[float]:
         try:
             import yfinance as yf
             ticker = yf.Ticker(isin)
             hist = ticker.history(period="5d")
             if hist is not None and not hist.empty:
+                last_idx = hist.index[-1]
+                try:
+                    date_str = last_idx.date().isoformat()
+                except AttributeError:
+                    date_str = str(last_idx)[:10]
+                self._last_nav_dates[isin] = date_str
                 return float(hist["Close"].iloc[-1])
         except Exception as e:
             logger.debug("YFinanceProvider.get_nav(%s) failed: %s", isin, e)
         return None
+
+    def get_nav_date(self, isin: str) -> Optional[str]:
+        return self._last_nav_dates.get(isin)
 
     def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
         try:
@@ -596,39 +641,66 @@ class CompositeProvider(FundDataProvider):
         self,
         providers: Optional[List[FundDataProvider]] = None,
         cache_path: Optional[str] = None,
+        force_refresh: bool = False,
     ):
+        """Inicializa el proveedor compuesto.
+
+        Args:
+            providers: lista explícita de proveedores (modo legacy).
+            cache_path: ruta base para la caché de disco de MStarProvider.
+            force_refresh: si ``True``, ignora la caché de disco de
+                MStarProvider y fuerza descarga fresca.  Usar cuando
+                el usuario pulsa "Recalcular Cotizaciones".
+        """
+        # Máxima antigüedad aceptable del NAV (días naturales).
+        # 3 días cubre fines de semana y festivos habituales.
+        self._nav_freshness_days = 3
+
         if providers is not None:
             # Modo legacy: se proporcionan los proveedores directamente
             self.providers = providers
             self._nav_chain = providers
+            self._history_chain = providers
             self._data_chain = providers
         else:
             from .finect_provider import FinectProvider
             from .ft_provider import FTProvider
 
             fmp = FMPProvider()
-            mstar = MStarProvider(cache_path=cache_path)
+            # Si force_refresh=True, ignorar la cache .pkl de MStar para
+            # garantizar datos frescos (evita servir historicos obsoletos).
+            mstar = MStarProvider(cache_path=cache_path, use_cache=not force_refresh)
             yf = YFinanceProvider()
             finect = FinectProvider()
             ft = FTProvider()
 
-            # Cadena NAV: prioriza velocidad
-            # FMP (~300ms, solo 1 request) → YFinance (~500ms)
-            self._nav_chain: List[FundDataProvider] = []
+            # Cadena NAV (precio actual): prioriza velocidad + frescura
+            # Finect (~500ms, NAV + fecha exacta) → YFinance (~300ms)
+            # → FMP (~300ms, si hay key) → MorningStar (backup lento)
+            self._nav_chain: List[FundDataProvider] = [finect, yf]
             if fmp.available:
                 self._nav_chain.append(fmp)
-            self._nav_chain.append(yf)
+            self._nav_chain.append(mstar)
 
-            # Cadena datos: FTProvider (sectores/holdings/regiones para UCITS europeos)
+            # Cadena historial: Finect BFF → YFinance → FMP → MStar.
+            # Se usa estrategia "longest wins": se consultan todos y se devuelve
+            # el resultado con más puntos, extendiendo el rango si varios tienen datos.
+            self._history_chain: List[FundDataProvider] = [finect, yf]
+            if fmp.available:
+                self._history_chain.append(fmp)
+            self._history_chain.append(mstar)
+
+            # Cadena datos: Finect (mejor fuente de métricas, sectores, regiones, fees)
+            # + FTProvider (sectores/holdings/regiones para UCITS europeos)
             # + YFinance (fondos americanos, ETFs, sector_weightings) + FMP
-            self._data_chain: List[FundDataProvider] = [ft, yf]
+            self._data_chain: List[FundDataProvider] = [finect, ft, yf]
             if fmp.available:
                 self._data_chain.append(fmp)
 
             # Mantener .providers para compatibilidad (unión de todas las cadenas, sin duplicados)
             seen = set()
             self.providers: List[FundDataProvider] = []
-            for p in self._nav_chain + self._data_chain + [mstar, finect]:
+            for p in self._nav_chain + self._history_chain + self._data_chain + [mstar, finect]:
                 pid = id(p)
                 if pid not in seen:
                     seen.add(pid)
@@ -656,17 +728,149 @@ class CompositeProvider(FundDataProvider):
         return None
 
     # ------------------------------------------------------------------
-    # NAV (velocidad ⚡) — usa _nav_chain
+    # NAV (velocidad ⚡) — usa _nav_chain con early termination
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _last_date(df: pd.DataFrame) -> Optional[str]:
+        """Devuelve la fecha del último registro de un historial [date, price]."""
+        if df is None or df.empty or "date" not in df.columns:
+            return None
+        try:
+            last = pd.to_datetime(df["date"]).max()
+            return last.strftime("%Y-%m-%d") if not pd.isnull(last) else None
+        except Exception:
+            return None
+
+    def _is_fresh(self, date_str: Optional[str]) -> bool:
+        """Comprueba si una fecha de NAV es suficientemente reciente.
+
+        Devuelve ``True`` si la fecha está dentro de los últimos
+        ``_nav_freshness_days`` días naturales (cubre fines de semana
+        y festivos habituales).
+        """
+        if not date_str:
+            return False
+        try:
+            nav_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+            delta = (datetime.now() - nav_date).days
+            return delta <= self._nav_freshness_days
+        except (ValueError, TypeError):
+            return False
+
     def get_nav(self, isin: str) -> Optional[float]:
-        """NAV actual — cadena rápida: FMP → YFinance → MStar."""
-        return self._first_success(self._nav_chain, "get_nav", isin)
+        """NAV actual con early termination.
+
+        Recorre la cadena NAV (Finect → YFinance → FMP → MStar) y
+        devuelve el primer precio cuya fecha sea reciente (≤ 3 días).
+        Si ningún proveedor devuelve fecha fresca, retorna el mejor
+        candidato (precio más reciente encontrado).
+
+        Usa ``get_nav()`` (ligero) en lugar de ``get_nav_history()``
+        (pesado) para máxima velocidad.
+        """
+        best_price: Optional[float] = None
+        best_date: Optional[str] = None
+
+        for p in self._nav_chain:
+            pname = type(p).__name__
+            try:
+                price = p.get_nav(isin)
+                if price is None or price <= 0:
+                    logger.debug("%s.get_nav(%s) → sin resultado", pname, isin)
+                    continue
+
+                nav_date = p.get_nav_date(isin)
+                logger.debug(
+                    "%s.get_nav(%s) → %.4f @ %s",
+                    pname, isin, price, nav_date or "sin fecha",
+                )
+
+                # Guardar como candidato si es mejor que lo que tenemos
+                if best_date is None or (nav_date and nav_date > best_date):
+                    best_price = price
+                    best_date = nav_date
+
+                # Early termination: si la fecha es fresca, aceptar de inmediato
+                if self._is_fresh(nav_date):
+                    logger.debug(
+                        "NAV para %s aceptado de %s (fresco: %s)",
+                        isin, pname, nav_date,
+                    )
+                    break
+
+            except Exception as e:
+                logger.debug("%s.get_nav(%s) failed: %s", pname, isin, e)
+                continue
+
+        # Propagar la mejor fecha al cache de YFinance para get_nav_date()
+        if best_date:
+            for p in self._nav_chain:
+                if isinstance(p, YFinanceProvider):
+                    p._last_nav_dates.setdefault(isin, best_date)
+                    break
+
+        return best_price
+
+    def get_nav_date(self, isin: str) -> Optional[str]:
+        """Última fecha de dato NAV — recorre la cadena con early termination."""
+        best_date: Optional[str] = None
+        for p in self._nav_chain:
+            try:
+                d = p.get_nav_date(isin)
+                if d and (best_date is None or d > best_date):
+                    best_date = d
+                    if self._is_fresh(d):
+                        break
+            except Exception:
+                continue
+        return best_date
 
     def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        """Histórico de precios — cadena rápida."""
-        result = self._first_success(self._nav_chain, "get_nav_history", isin, years=years)
-        return result if result is not None else pd.DataFrame(columns=["date", "price"])
+        """Histórico de precios — estrategia "longest wins".
+
+        Consulta todos los proveedores de la cadena (Finect BFF, YFinance, FMP, MStar)
+        y devuelve la serie más larga (mayor número de puntos).  Si varias fuentes
+        tienen datos complementarios (rangos de fecha distintos) las combina para
+        obtener el histórico más completo posible.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results: list[pd.DataFrame] = []
+
+        def _fetch(p: FundDataProvider) -> pd.DataFrame:
+            try:
+                df = p.get_nav_history(isin, years=years)
+                if df is not None and not df.empty and "date" in df.columns:
+                    df = df.copy()
+                    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+                    return df.dropna(subset=["price"]).reset_index(drop=True)
+            except Exception as exc:
+                logger.debug("%s.get_nav_history(%s) failed: %s", type(p).__name__, isin, exc)
+            return pd.DataFrame(columns=["date", "price"])
+
+        # Fetch in parallel
+        with ThreadPoolExecutor(max_workers=min(len(self._history_chain), 4)) as pool:
+            futures = {pool.submit(_fetch, p): p for p in self._history_chain}
+            for fut in as_completed(futures):
+                df = fut.result()
+                if not df.empty:
+                    results.append(df)
+
+        if not results:
+            return pd.DataFrame(columns=["date", "price"])
+
+        if len(results) == 1:
+            return results[0]
+
+        # Merge all results: concatenate and take the entry with the most
+        # data per date (prefer the result with the most total points for
+        # dates that overlap — i.e. keep the longest range but fill gaps).
+        combined = pd.concat(results).sort_values("date")
+        # For overlapping dates keep last (longest result sorted last by len)
+        results_sorted = sorted(results, key=len)
+        combined = pd.concat(results_sorted).drop_duplicates(subset="date", keep="last").sort_values("date")
+        return combined.reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Info (completitud 📊) — fusiona TODOS los proveedores de _data_chain

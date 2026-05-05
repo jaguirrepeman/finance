@@ -1,4 +1,4 @@
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect } = React;
 const COLORS = ['#4ca1af', '#c4e0e5', '#89f7fe', '#66a6ff', '#f3a183', '#a18cd1', '#fbc2eb', '#fad0c4', '#ff9a9e', '#fecfef'];
 
 // ---------------- UI COMPONENTS ----------------
@@ -51,49 +51,35 @@ const GeneralTab = ({ data, chartData, reloadData }) => {
                         <thead>
                             <tr>
                                 <th>Fondo / Activo</th>
-                                <th>Tipo</th>
-                                <th style={{textAlign:'right'}}>Peso</th>
-                                <th style={{textAlign:'right'}}>Valor Actual (€)</th>
-                                <th style={{textAlign:'right'}}>Invertido (€)</th>
-                                <th style={{textAlign:'right'}}>Ganancia (€)</th>
-                                <th style={{textAlign:'right'}}>Ganancia (%)</th>
-                                <th style={{textAlign:'right'}}>NAV</th>
+                                <th>Tipo / Categoría MS</th>
+                                <th>NAV Actual</th>
+                                <th>YTD (%)</th>
                                 <th>Rating</th>
-                                <th></th>
+                                <th>Acciones</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {[...data.funds].sort((a, b) => b.Porcentaje - a.Porcentaje).map((fund, idx) => {
-                                const ganPct = fund.Ganancia_Pct;
-                                const ganAbs = fund.Ganancia_Abs;
-                                const posColor = ganPct > 0 ? 'var(--success)' : ganPct < 0 ? 'var(--danger)' : 'var(--text-primary)';
-                                return (
-                                    <tr key={idx}>
-                                        <td style={{fontWeight: 500}}>
-                                            <div style={{display:'flex', alignItems:'center', gap:'6px'}}>
-                                                <span style={{display:'inline-block', width:'8px', height:'8px', borderRadius:'2px', background: fund.IsIndex ? '#00d4aa' : '#8b5cf6', flexShrink:0}} title={fund.IsIndex ? 'Indexado' : 'Activo'} />
-                                                <span>{fund.Fondo}</span>
-                                            </div>
-                                            <div style={{color: 'var(--text-secondary)', fontSize: '0.73rem', marginLeft:'14px'}}>{fund.ISIN || ''}</div>
-                                        </td>
-                                        <td>
-                                            <span style={{padding: '3px 7px', background: 'var(--border-glass)', borderRadius: '6px', fontSize: '0.75rem'}}>
-                                                {fund['Categoría'] || fund.TIPO}
-                                            </span>
-                                        </td>
-                                        <td style={{textAlign:'right', fontWeight:600, color:'var(--accent-glow)'}}>{fund.Porcentaje.toFixed(1)}%</td>
-                                        <td style={{textAlign:'right', fontVariantNumeric:'tabular-nums'}}>{fund.Valor_Actual != null ? `€${fund.Valor_Actual.toLocaleString('es-ES', {minimumFractionDigits:2})}` : '---'}</td>
-                                        <td style={{textAlign:'right', color:'var(--text-secondary)', fontVariantNumeric:'tabular-nums'}}>{fund.Capital_Invertido != null ? `€${fund.Capital_Invertido.toLocaleString('es-ES', {minimumFractionDigits:2})}` : '---'}</td>
-                                        <td style={{textAlign:'right', fontWeight:600, color:posColor, fontVariantNumeric:'tabular-nums'}}>{ganAbs != null ? `${ganAbs >= 0 ? '+' : ''}€${Math.abs(ganAbs).toLocaleString('es-ES', {minimumFractionDigits:2})}` : '---'}</td>
-                                        <td style={{textAlign:'right', fontWeight:600, color:posColor, fontVariantNumeric:'tabular-nums'}}>{ganPct != null ? `${ganPct >= 0 ? '+' : ''}${ganPct.toFixed(1)}%` : '---'}</td>
-                                        <td style={{textAlign:'right', color: 'var(--text-primary)', fontWeight: 'bold', fontVariantNumeric:'tabular-nums'}}>{fund['NAV (Precio)'] || '---'}</td>
-                                        <td style={{color: 'var(--accent-secondary)'}}>{fund['Estrellas MS'] || '---'}</td>
-                                        <td>
-                                            <button onClick={() => handleDelete(fund.ISIN || fund.Fondo)} style={{background:'transparent', color:'var(--danger)', border:'1px solid var(--danger)', padding:'3px 7px', borderRadius:'4px', cursor:'pointer', fontSize:'0.75rem'}}>✕</button>
-                                        </td>
-                                    </tr>
-                                );
-                            })}
+                            {data.funds.map((fund, idx) => (
+                                <tr key={idx}>
+                                    <td style={{fontWeight: 500}}>
+                                        {fund.Fondo} <span style={{color: 'var(--accent-glow)', fontSize: '0.75rem'}}>({fund.Porcentaje}%)</span>
+                                        <div style={{color: 'var(--text-secondary)', fontSize: '0.75rem'}}>{fund.ISIN || ''}</div>
+                                    </td>
+                                    <td>
+                                        <span style={{padding: '4px 8px', background: 'var(--border-glass)', borderRadius: '6px', fontSize: '0.8rem'}}>
+                                            {fund['Categoría'] || fund.TIPO}
+                                        </span>
+                                    </td>
+                                    <td style={{color: 'var(--text-primary)', fontWeight: 'bold'}}>{fund['NAV (Precio)'] || '---'}</td>
+                                    <td style={{color: fund['YTD (%)'] && fund['YTD (%)'].includes('-') ? 'var(--danger)' : 'var(--success)'}}>
+                                        {fund['YTD (%)'] || '---'}
+                                    </td>
+                                    <td style={{color: 'var(--accent-secondary)'}}>{fund['Estrellas MS'] || '---'}</td>
+                                    <td>
+                                        <button onClick={() => handleDelete(fund.ISIN || fund.Fondo)} style={{background:'transparent', color:'var(--danger)', border:'1px solid var(--danger)', padding:'4px 8px', borderRadius:'4px', cursor:'pointer'}}>X</button>
+                                    </td>
+                                </tr>
+                            ))}
                         </tbody>
                     </table>
                 </div>
@@ -115,75 +101,45 @@ const GeneralTab = ({ data, chartData, reloadData }) => {
                 </form>
             </div>
 
-            {/* Asset Allocation + Indexado/Activo */}
-            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1rem', marginTop:'1.5rem'}}>
-                <div className="glass-panel" style={{padding: '1rem'}}>
-                    <h4 style={{margin:'0 0 0.75rem', fontWeight:600, fontSize:'0.9rem'}}>Asset Allocation</h4>
-                    <div style={{display: 'flex', height: '24px', borderRadius: '6px', overflow: 'hidden', width: '100%', marginBottom:'0.75rem'}}>
-                        {chartData.map((entry, index) => (
-                            <div key={entry.name} title={`${entry.name}: ${entry.value.toFixed(1)}%`} style={{
-                                width: `${(entry.value / Object.values(data.summary.details).reduce((a,b)=>a+b,0)) * 100}%`,
-                                backgroundColor: COLORS[index % COLORS.length]
-                            }} />
-                        ))}
-                    </div>
-                    <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.6rem'}}>
-                        {chartData.map((entry, index) => (
-                            <div key={entry.name} style={{display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem'}}>
-                                <div style={{width: '10px', height: '10px', borderRadius: '3px', backgroundColor: COLORS[index % COLORS.length]}} />
-                                <span style={{color: 'var(--text-secondary)'}}>{entry.name} <strong style={{color: 'var(--text-primary)'}}>{entry.value.toFixed(1)}%</strong></span>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-                <div className="glass-panel" style={{padding: '1rem'}}>
-                    <h4 style={{margin:'0 0 0.75rem', fontWeight:600, fontSize:'0.9rem'}}>Gestión</h4>
-                    {(() => {
-                        const ti = data.summary.total_indexed || 0;
-                        const ta = data.summary.total_active || 0;
-                        const total = ti + ta || 1;
-                        return (
-                            <React.Fragment>
-                                <div style={{display: 'flex', height: '24px', borderRadius: '6px', overflow: 'hidden', width: '100%', marginBottom:'0.75rem'}}>
-                                    <div style={{width:`${(ti/total)*100}%`, background:'#00d4aa', transition:'width 0.3s'}} title={`Indexado: ${ti.toFixed(1)}%`} />
-                                    <div style={{width:`${(ta/total)*100}%`, background:'#8b5cf6', transition:'width 0.3s'}} title={`Activo: ${ta.toFixed(1)}%`} />
+            <div className="advice-section">
+                <div className="glass-panel" style={{height: '300px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '1rem'}}>
+                     <h3 style={{marginBottom: '1rem', alignSelf: 'flex-start'}}>Asset Allocation</h3>
+                     <div style={{width: '100%', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center'}}>
+                         <div style={{display: 'flex', height: '35px', borderRadius: '8px', overflow: 'hidden', width: '100%', boxShadow: '0 4px 12px rgba(0,0,0,0.2)'}}>
+                            {chartData.map((entry, index) => (
+                                <div key={entry.name} style={{
+                                    width: `${(entry.value / Object.values(data.summary.details).reduce((a,b)=>a+b,0)) * 100}%`,
+                                    backgroundColor: COLORS[index % COLORS.length]
+                                }} />
+                            ))}
+                         </div>
+                         <div style={{display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'center', marginTop: '1.5rem'}}>
+                            {chartData.map((entry, index) => (
+                                <div key={entry.name} style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem'}}>
+                                    <div style={{width: '12px', height: '12px', borderRadius: '50%', backgroundColor: COLORS[index % COLORS.length]}} />
+                                    <span style={{color: 'var(--text-secondary)'}}>{entry.name} <strong style={{color: 'var(--text-primary)'}}>({entry.value.toFixed(2)}%)</strong></span>
                                 </div>
-                                <div style={{display:'flex', gap:'1.5rem', fontSize:'0.8rem'}}>
-                                    <div style={{display:'flex', alignItems:'center', gap:'0.4rem'}}>
-                                        <div style={{width:'10px', height:'10px', borderRadius:'3px', background:'#00d4aa'}} />
-                                        <span style={{color:'var(--text-secondary)'}}>Indexado <strong style={{color:'#00d4aa'}}>{ti.toFixed(1)}%</strong></span>
-                                    </div>
-                                    <div style={{display:'flex', alignItems:'center', gap:'0.4rem'}}>
-                                        <div style={{width:'10px', height:'10px', borderRadius:'3px', background:'#8b5cf6'}} />
-                                        <span style={{color:'var(--text-secondary)'}}>Activo <strong style={{color:'#8b5cf6'}}>{ta.toFixed(1)}%</strong></span>
-                                    </div>
-                                </div>
-                            </React.Fragment>
-                        );
-                    })()}
+                            ))}
+                         </div>
+                     </div>
                 </div>
+                {data.recommendation.rf_sug && <AdviceCard advice={data.recommendation.rf_sug} type="info" />}
+                {data.recommendation.cash_warn && <AdviceCard advice={data.recommendation.cash_warn} type="warning" />}
             </div>
-            {data.recommendation.cash_warn && <div style={{marginTop:'1rem'}}><AdviceCard advice={data.recommendation.cash_warn} type="warning" /></div>}
         </div>
     );
 };
 
-// ---------------- TAB 2: Detalle (Geografías, Sectores y Métricas + MSCI World) ----------------
-const DetailsTab = ({ onRefreshDetails, refreshingDetails }) => {
+// ---------------- TAB 2: Detalle (Geografías, Sectores y Métricas) ----------------
+const DetailsTab = () => {
     const [details, setDetails] = useState(null);
-    const [benchmark, setBenchmark] = useState(null);
     const [loading, setLoading] = useState(true);
     const [expandedFund, setExpandedFund] = useState(null);
-
     useEffect(() => {
-        Promise.all([
-            fetch('/api/portfolio/details').then(r => r.json()),
-            fetch('/api/portfolio/benchmark/msci-world').then(r => r.json()).catch(() => null),
-        ]).then(([d, b]) => {
-            setDetails(d);
-            setBenchmark(b);
-            setLoading(false);
-        }).catch(() => setLoading(false));
+        fetch('/api/portfolio/details')
+            .then(r => r.json())
+            .then(d => { setDetails(d); setLoading(false); })
+            .catch(() => setLoading(false));
     }, []);
 
     if (loading) return <div style={{padding:'3rem', textAlign:'center'}}><div className="spinner" style={{margin:'0 auto 1rem'}}></div><span style={{color:'var(--text-secondary)'}}>Cargando perfiles estructurales...</span></div>;
@@ -198,9 +154,9 @@ const DetailsTab = ({ onRefreshDetails, refreshingDetails }) => {
             <div style={{color:'var(--text-secondary)', marginBottom:'1rem'}}>
                 No hay datos sectoriales/geográficos disponibles.
             </div>
-            <button onClick={onRefreshDetails} disabled={refreshingDetails} style={{padding:'10px 20px', background:'var(--accent-secondary)', color:'white', border:'none', borderRadius:'8px', fontWeight:600, cursor:'pointer'}}>
-                {refreshingDetails ? 'Recalculando...' : '🔄 Recalcular Detalles'}
-            </button>
+            <div style={{fontSize:'0.85rem', color:'var(--text-secondary)'}}>
+                Pulsa "🔄 Recalcular Morningstar" para descargar los perfiles detallados de cada fondo.
+            </div>
         </div>
     );
 
@@ -248,90 +204,34 @@ const DetailsTab = ({ onRefreshDetails, refreshingDetails }) => {
     const sectors = aggregate('sector');
     const regions = aggregate('region');
 
-    // Comparison bar renderer: Mi Cartera vs MSCI World
-    const renderComparisonBars = (dataList, benchmarkData) => {
-        const allKeys = new Set([
-            ...dataList.map(d => d.name),
-            ...(benchmarkData ? Object.keys(benchmarkData) : []),
-        ]);
-        const merged = Array.from(allKeys).map(name => {
-            const mine = dataList.find(d => d.name === name);
-            const msci = benchmarkData ? (benchmarkData[name] || 0) : 0;
-            return { name, myValue: mine ? mine.value : 0, msciValue: msci };
-        }).filter(x => x.myValue > 0.5 || x.msciValue > 0.5)
-          .sort((a, b) => b.myValue - a.myValue);
-
-        return (
-            <div style={{display:'flex', flexDirection:'column', gap:'14px'}}>
-                {merged.map((item, idx) => {
-                    const diff = item.myValue - item.msciValue;
-                    const hasBenchmark = benchmarkData && item.msciValue > 0;
-                    return (
-                        <div key={item.name} style={{fontSize:'0.85rem'}}>
-                            <div style={{display:'flex', justifyContent:'space-between', marginBottom:'4px', alignItems:'center'}}>
-                                <span>{item.name}</span>
-                                <div style={{display:'flex', gap:'10px', alignItems:'center'}}>
-                                    <strong style={{color:'var(--accent-glow)'}}>{item.myValue.toFixed(1)}%</strong>
-                                    {hasBenchmark && (
-                                        <React.Fragment>
-                                            <span style={{color:'var(--text-secondary)', fontSize:'0.75rem'}}>MSCI: {item.msciValue.toFixed(1)}%</span>
-                                            <span style={{fontSize:'0.72rem', fontWeight:700, color: diff > 1 ? 'var(--success)' : diff < -1 ? 'var(--danger)' : 'var(--text-secondary)'}}>
-                                                {diff >= 0 ? '+' : ''}{diff.toFixed(1)}%
-                                            </span>
-                                        </React.Fragment>
-                                    )}
-                                </div>
-                            </div>
-                            <div style={{position:'relative', width:'100%', height: hasBenchmark ? '14px' : '8px', background:'var(--border-glass)', borderRadius:'4px', overflow:'hidden'}}>
-                                <div style={{height: hasBenchmark ? '7px' : '8px', width:`${Math.min(item.myValue * 2, 100)}%`, background: COLORS[idx % COLORS.length], borderRadius:'4px 4px 0 0'}} />
-                                {hasBenchmark && (
-                                    <div style={{height:'7px', width:`${Math.min(item.msciValue * 2, 100)}%`, background:'rgba(255,215,0,0.5)', borderRadius:'0 0 4px 4px'}} />
-                                )}
-                            </div>
-                        </div>
-                    );
-                })}
-                {merged.length === 0 && <span style={{color:'var(--text-secondary)'}}>No se detectó información.</span>}
-            </div>
-        );
-    };
+    const renderBars = (dataList) => (
+        <div style={{display:'flex', flexDirection:'column', gap:'12px'}}>
+             {dataList.map((item, idx) => (
+                 <div key={item.name} style={{fontSize:'0.85rem'}}>
+                     <div style={{display:'flex', justifyContent:'space-between', marginBottom:'6px'}}>
+                         <span>{item.name}</span>
+                         <strong style={{color:'var(--accent-secondary)'}}>{item.value.toFixed(1)}%</strong>
+                     </div>
+                     <div style={{width:'100%', height:'8px', background:'var(--border-glass)', borderRadius:'4px', overflow:'hidden'}}>
+                         <div style={{height:'100%', width:`${Math.min(item.value*2, 100)}%`, background: COLORS[idx % COLORS.length]}} />
+                     </div>
+                 </div>
+             ))}
+             {dataList.length === 0 && <span style={{color:'var(--text-secondary)'}}>No se detectó información en la capa externa.</span>}
+        </div>
+    );
 
     return (
         <div>
-            {/* Recalcular Detalles button */}
-            <div style={{display:'flex', justifyContent:'flex-end', marginBottom:'1rem'}}>
-                <button onClick={onRefreshDetails} disabled={refreshingDetails} style={{
-                    padding:'8px 16px', background: refreshingDetails ? 'var(--border-glass)' : 'var(--accent-secondary)',
-                    color:'white', border:'none', borderRadius:'8px', fontWeight:600, cursor: refreshingDetails ? 'not-allowed' : 'pointer', fontSize:'0.85rem', transition:'all 0.2s'
-                }}>
-                    {refreshingDetails ? '⏳ Recalculando Detalles...' : '🔄 Recalcular Detalles'}
-                </button>
-            </div>
-
-            {/* Legend for comparison */}
-            {benchmark && (
-                <div style={{display:'flex', gap:'16px', marginBottom:'1rem', padding:'8px 14px', background:'rgba(255,215,0,0.06)', borderRadius:'8px', border:'1px solid rgba(255,215,0,0.15)', alignItems:'center', fontSize:'0.8rem'}}>
-                    <span style={{display:'flex', alignItems:'center', gap:'6px'}}>
-                        <span style={{width:'12px', height:'6px', background:'var(--accent-glow)', borderRadius:'2px', display:'inline-block'}} />
-                        Mi Cartera
-                    </span>
-                    <span style={{display:'flex', alignItems:'center', gap:'6px'}}>
-                        <span style={{width:'12px', height:'6px', background:'rgba(255,215,0,0.5)', borderRadius:'2px', display:'inline-block'}} />
-                        MSCI World
-                    </span>
-                    <span style={{color:'var(--text-secondary)', marginLeft:'auto', fontSize:'0.75rem'}}>Diferencia: <span style={{color:'var(--success)'}}>+sobreponderado</span> / <span style={{color:'var(--danger)'}}>-infraponderado</span></span>
-                </div>
-            )}
-
-            {/* Aggregate Sector & Region with MSCI comparison */}
+            {/* Aggregate Sector & Region */}
             <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(300px, 1fr))', gap:'2rem', marginBottom:'2rem'}}>
                 <div className="glass-panel" style={{padding: '2rem'}}>
                     <h3 style={{marginBottom:'1.5rem', fontWeight:600}}>🎯 Exposición Sectorial</h3>
-                    {renderComparisonBars(sectors, benchmark ? benchmark.sectors : null)}
+                    {renderBars(sectors)}
                 </div>
                 <div className="glass-panel" style={{padding: '2rem'}}>
                     <h3 style={{marginBottom:'1.5rem', fontWeight:600}}>🌍 Exposición Geográfica</h3>
-                    {renderComparisonBars(regions, benchmark ? benchmark.regions : null)}
+                    {renderBars(regions)}
                 </div>
             </div>
 
@@ -384,33 +284,10 @@ const DetailsTab = ({ onRefreshDetails, refreshingDetails }) => {
 // ---------------- TAB 3: Evolución ----------------
 
 const HeatmapRenderer = ({ data, activeFunds }) => {
-    const [sortMode, setSortMode] = useState('weight'); // 'weight' | 'corr'
     if (!data || !data.labels) return null;
-    const baseLabels = data.labels.filter(l => activeFunds.includes(l));
-    if (baseLabels.length < 2) return <div style={{padding:'1rem', color:'var(--text-secondary)'}}>Selecciona al menos dos fondos para ver la correlación.</div>;
-
-    // Sort labels by avg cross-correlation (desc) or keep original order
-    const labels = sortMode === 'corr'
-        ? [...baseLabels].sort((a, b) => {
-            const avgA = baseLabels.reduce((s, l) => s + (l !== a ? (data.matrix[a]?.[l] ?? 0) : 0), 0) / (baseLabels.length - 1);
-            const avgB = baseLabels.reduce((s, l) => s + (l !== b ? (data.matrix[b]?.[l] ?? 0) : 0), 0) / (baseLabels.length - 1);
-            return avgB - avgA;
-          })
-        : baseLabels;
-
+    const labels = data.labels.filter(l => activeFunds.includes(l));
+    if (labels.length < 2) return <div style={{padding:'1rem', color:'var(--text-secondary)'}}>Selecciona al menos dos fondos para ver la correlación.</div>;
     return (
-        <div>
-        <div style={{marginBottom:'8px', display:'flex', gap:'6px', alignItems:'center'}}>
-            <span style={{fontSize:'0.75rem', color:'var(--text-secondary)'}}>Ordenar:</span>
-            {[['weight', 'Por peso'], ['corr', 'Por correlación media']].map(([mode, label]) => (
-                <button key={mode} onClick={() => setSortMode(mode)} style={{
-                    padding:'3px 10px', borderRadius:'10px', fontSize:'0.72rem', cursor:'pointer',
-                    border: sortMode === mode ? '1px solid var(--accent-glow)' : '1px solid var(--border-glass)',
-                    background: sortMode === mode ? 'var(--accent-glow)' : 'transparent',
-                    color: sortMode === mode ? '#000' : 'var(--text-secondary)',
-                }}>{label}</button>
-            ))}
-        </div>
         <div style={{display: 'grid', gridTemplateColumns: `auto repeat(${labels.length}, 1fr)`, gap: '3px', fontSize:'0.7rem', marginTop: '1rem'}}>
             <div />
             {labels.map(l => <div key={l} style={{textAlign:'center', writingMode: 'vertical-rl', alignSelf:'end', maxHeight:'110px', overflow:'hidden'}}>{l.substring(0,20)}</div>)}
@@ -419,9 +296,10 @@ const HeatmapRenderer = ({ data, activeFunds }) => {
                     <div style={{textAlign:'right', paddingRight: '8px', alignSelf:'center', fontWeight: 'bold', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:'140px'}}>{l1.substring(0,20)}</div>
                     {labels.map((l2) => {
                         const val = data.matrix[l1]?.[l2] ?? null;
-                        if (val === null) {
+                        if (val === null || val === 0 && l1 !== l2) {
                             return <div key={l2} style={{backgroundColor:'rgba(128,128,128,0.3)', color:'var(--text-secondary)', padding:'8px 4px', textAlign:'center', borderRadius:'4px', fontSize:'0.65rem'}}>N/A</div>;
                         }
+                        // Color scale: -1 (red) → 0 (yellow) → +1 (green)
                         const hue = ((val + 1) / 2) * 120;
                         const sat = Math.abs(val) > 0.5 ? 80 : 60;
                         const light = l1 === l2 ? 30 : 40;
@@ -439,251 +317,18 @@ const HeatmapRenderer = ({ data, activeFunds }) => {
                 </React.Fragment>
             ))}
         </div>
-        </div>
     );
 };
 
-// ---- Period helpers (shared by metrics & correlation) ----
-const getDateRange = (timeframe, customRange) => {
-    const end = (customRange && customRange.to) ? new Date(customRange.to) : new Date();
-    const start = new Date(end);
-    if (customRange && customRange.from) return { start: new Date(customRange.from), end };
-    if (timeframe === '1M') start.setMonth(start.getMonth() - 1);
-    else if (timeframe === '3M') start.setMonth(start.getMonth() - 3);
-    else if (timeframe === 'YTD') { start.setMonth(0); start.setDate(1); }
-    else if (timeframe === '1Y') start.setFullYear(start.getFullYear() - 1);
-    else if (timeframe === '3Y') start.setFullYear(start.getFullYear() - 3);
-    else if (timeframe === '5Y') start.setFullYear(start.getFullYear() - 5);
-    else if (timeframe === '10Y') start.setFullYear(start.getFullYear() - 10);
-    else start.setFullYear(1900); // MAX
-    return { start, end };
-};
-
-const filterSeries = (series, start, end) =>
-    series.filter(p => { const d = new Date(p.date); return d >= start && d <= end; });
-
-// Compute per-fund metrics for an array of {date, price} points
-// benchmarkPts: optional array of {date, price} for Alpha/Beta calculation
-const computeFundMetrics = (pts, benchmarkPts) => {
-    if (!pts || pts.length < 5) return null;
-    const first = pts[0].price, last = pts[pts.length - 1].price;
-    const days = (new Date(pts[pts.length-1].date) - new Date(pts[0].date)) / 86400000 || 1;
-    const totalReturn = (last / first - 1) * 100;
-    const annReturn = ((Math.pow(last / first, 365 / days)) - 1) * 100;
-    // Daily log returns for vol
-    const logRets = [];
-    for (let i = 1; i < pts.length; i++) {
-        if (pts[i].price > 0 && pts[i-1].price > 0)
-            logRets.push(Math.log(pts[i].price / pts[i-1].price));
-    }
-    let vol = null, sharpe = null;
-    if (logRets.length >= 10) {
-        const mean = logRets.reduce((a, b) => a + b, 0) / logRets.length;
-        const variance = logRets.reduce((a, b) => a + (b - mean) ** 2, 0) / logRets.length;
-        vol = Math.sqrt(variance * 252) * 100;
-        sharpe = vol > 0 ? (annReturn / vol) : null;
-    }
-    // Max drawdown
-    let peak = pts[0].price, maxDD = 0;
-    for (const p of pts) {
-        if (p.price > peak) peak = p.price;
-        const dd = (peak - p.price) / peak;
-        if (dd > maxDD) maxDD = dd;
-    }
-    // Alpha / Beta vs benchmark (MSCI World proxy)
-    let alpha = null, beta = null;
-    if (benchmarkPts && benchmarkPts.length >= 10) {
-        const ptsMap = {};
-        pts.forEach(p => { ptsMap[p.date] = p.price; });
-        const benchMap = {};
-        benchmarkPts.forEach(p => { benchMap[p.date] = p.price; });
-        const commonDates = Object.keys(ptsMap).filter(d => benchMap[d]).sort();
-        if (commonDates.length >= 20) {
-            const fundRets = [], benchRets = [];
-            for (let i = 1; i < commonDates.length; i++) {
-                const dp = commonDates[i-1], dc = commonDates[i];
-                if (ptsMap[dp] > 0 && ptsMap[dc] > 0 && benchMap[dp] > 0 && benchMap[dc] > 0) {
-                    fundRets.push(Math.log(ptsMap[dc] / ptsMap[dp]));
-                    benchRets.push(Math.log(benchMap[dc] / benchMap[dp]));
-                }
-            }
-            if (fundRets.length >= 20) {
-                const mf = fundRets.reduce((a,b) => a+b, 0) / fundRets.length;
-                const mb = benchRets.reduce((a,b) => a+b, 0) / benchRets.length;
-                let cov = 0, vb = 0;
-                for (let i = 0; i < fundRets.length; i++) {
-                    cov += (fundRets[i] - mf) * (benchRets[i] - mb);
-                    vb += (benchRets[i] - mb) ** 2;
-                }
-                if (vb !== 0) {
-                    beta = +(cov / vb).toFixed(3);
-                    const bFirst = benchmarkPts[0].price, bLast = benchmarkPts[benchmarkPts.length-1].price;
-                    const bDays = (new Date(benchmarkPts[benchmarkPts.length-1].date) - new Date(benchmarkPts[0].date)) / 86400000 || 1;
-                    const benchAnn = ((Math.pow(bLast / bFirst, 365 / bDays)) - 1) * 100;
-                    alpha = +(annReturn - beta * benchAnn).toFixed(2);
-                }
-            }
-        }
-    }
-    return {
-        totalReturn: +totalReturn.toFixed(2),
-        annReturn: +annReturn.toFixed(2),
-        vol: vol !== null ? +vol.toFixed(2) : null,
-        sharpe: sharpe !== null ? +sharpe.toFixed(3) : null,
-        maxDD: +(maxDD * 100).toFixed(2),
-        alpha,
-        beta,
-    };
-};
-
-// Compute Pearson correlation between two numeric arrays
-const pearson = (a, b) => {
-    if (a.length !== b.length || a.length < 5) return null;
-    const n = a.length;
-    const ma = a.reduce((s, v) => s + v, 0) / n;
-    const mb = b.reduce((s, v) => s + v, 0) / n;
-    let num = 0, da2 = 0, db2 = 0;
-    for (let i = 0; i < n; i++) {
-        const da = a[i] - ma, db = b[i] - mb;
-        num += da * db; da2 += da * da; db2 += db * db;
-    }
-    const denom = Math.sqrt(da2 * db2);
-    return denom === 0 ? null : +(num / denom).toFixed(4);
-};
-
-// Build correlation matrix from historyBatch filtered by period
-const computeClientCorrelation = (historyBatch, funds, start, end) => {
-    const dailyRets = {};
-    const dateIndex = {};
-    funds.forEach(fund => {
-        const pts = filterSeries(historyBatch[fund] || [], start, end);
-        if (pts.length < 6) return;
-        for (let i = 1; i < pts.length; i++) {
-            const d = pts[i].date;
-            if (!dateIndex[d]) dateIndex[d] = {};
-            if (pts[i].price > 0 && pts[i-1].price > 0)
-                dateIndex[d][fund] = Math.log(pts[i].price / pts[i-1].price);
-        }
-    });
-    const labels = funds.filter(f => (historyBatch[f] || []).length >= 6);
-    const matrix = {};
-    labels.forEach(f1 => {
-        matrix[f1] = {};
-        labels.forEach(f2 => {
-            if (f1 === f2) { matrix[f1][f2] = 1.0; return; }
-            const dates = Object.keys(dateIndex).filter(d => dateIndex[d][f1] !== undefined && dateIndex[d][f2] !== undefined);
-            if (dates.length < 30) { matrix[f1][f2] = null; return; }
-            matrix[f1][f2] = pearson(dates.map(d => dateIndex[d][f1]), dates.map(d => dateIndex[d][f2]));
-        });
-    });
-    return { labels, matrix };
-};
-
-// Fund metrics table component
-const FundMetricsTable = ({ historyBatch, activeFunds, timeframe, customRange, fundColorMap, benchmarkKey }) => {
-    const [sortCol, setSortCol] = useState('annReturn');
-    const [sortAsc, setSortAsc] = useState(false);
-
-    const { start, end } = getDateRange(timeframe, customRange);
-    const benchmarkPts = benchmarkKey ? filterSeries(historyBatch[benchmarkKey] || [], start, end) : null;
-
-    const rows = activeFunds.map(fund => {
-        const pts = filterSeries(historyBatch[fund] || [], start, end);
-        const bPts = (benchmarkKey && fund !== benchmarkKey) ? benchmarkPts : null;
-        return { fund, m: computeFundMetrics(pts, bPts) };
-    }).filter(r => r.m !== null);
-
-    const sortedRows = [...rows].sort((a, b) => {
-        const va = a.m[sortCol], vb = b.m[sortCol];
-        if (va === null && vb === null) return 0;
-        if (va === null) return 1;
-        if (vb === null) return -1;
-        return sortAsc ? va - vb : vb - va;
-    });
-
-    const handleSort = (key) => {
-        if (sortCol === key) setSortAsc(!sortAsc);
-        else { setSortCol(key); setSortAsc(false); }
-    };
-
-    if (sortedRows.length === 0) return <div style={{padding:'1rem', color:'var(--text-secondary)', textAlign:'center'}}>Sin datos suficientes para el periodo.</div>;
-
-    const signColor = v => v > 0 ? 'var(--success)' : v < 0 ? 'var(--danger)' : 'var(--text-primary)';
-    const isPortfolio = name => name.includes('Mi Cartera');
-    const hasBenchmark = benchmarkKey && !!benchmarkPts && benchmarkPts.length >= 10;
-    const cols = [
-        { key: 'totalReturn', label: 'Retorno Total', unit: '%', color: signColor },
-        { key: 'annReturn', label: 'CAGR', unit: '%', color: signColor },
-        { key: 'vol', label: 'Volatilidad', unit: '%', color: v => v !== null ? (v < 10 ? 'var(--success)' : v < 20 ? 'var(--warning)' : 'var(--danger)') : 'var(--text-secondary)' },
-        { key: 'sharpe', label: 'Sharpe', unit: '', color: v => v !== null ? signColor(v) : 'var(--text-secondary)' },
-        { key: 'maxDD', label: 'Max Drawdown', unit: '%', color: v => v !== null ? (v < 10 ? 'var(--success)' : v < 20 ? 'var(--warning)' : 'var(--danger)') : 'var(--text-secondary)' },
-        ...(hasBenchmark ? [
-            { key: 'alpha', label: 'Alpha (%aa)', unit: '', color: v => v !== null ? signColor(v) : 'var(--text-secondary)' },
-            { key: 'beta', label: 'Beta', unit: '', color: v => v !== null ? (v < 0.8 ? 'var(--success)' : v > 1.2 ? 'var(--danger)' : 'var(--text-primary)') : 'var(--text-secondary)' },
-        ] : []),
-    ];
-
-    const SortIcon = ({ col }) => {
-        if (sortCol !== col) return <span style={{opacity:0.3, marginLeft:'4px'}}>⇅</span>;
-        return <span style={{marginLeft:'4px', color:'var(--accent-glow)'}}>{sortAsc ? '↑' : '↓'}</span>;
-    };
-
-    return (
-        <div style={{overflowX:'auto'}}>
-            {hasBenchmark && (
-                <div style={{fontSize:'0.75rem', color:'var(--text-secondary)', marginBottom:'6px', padding:'4px 10px', background:'rgba(0,212,170,0.06)', borderRadius:'6px', border:'1px solid rgba(0,212,170,0.15)'}}>
-                    α/β calculados vs <strong style={{color:'var(--accent-glow)'}}>{benchmarkKey}</strong> en el periodo seleccionado
-                </div>
-            )}
-            <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.82rem'}}>
-                <thead>
-                    <tr style={{borderBottom:'1px solid rgba(255,255,255,0.1)'}}>
-                        <th style={{textAlign:'left', padding:'8px 10px', color:'var(--text-secondary)', fontWeight:600, minWidth:'160px'}}>Fondo</th>
-                        {cols.map(c => (
-                            <th key={c.key} onClick={() => handleSort(c.key)}
-                                style={{textAlign:'right', padding:'8px 10px', color: sortCol === c.key ? 'var(--accent-glow)' : 'var(--text-secondary)', fontWeight:600, whiteSpace:'nowrap', cursor:'pointer', userSelect:'none'}}>
-                                {c.label}<SortIcon col={c.key} />
-                            </th>
-                        ))}
-                    </tr>
-                </thead>
-                <tbody>
-                    {sortedRows.map(({ fund, m }) => {
-                        const color = fundColorMap[fund] || '#ffffff';
-                        const isP = isPortfolio(fund);
-                        return (
-                            <tr key={fund} style={{borderBottom:'1px solid rgba(255,255,255,0.05)', background: isP ? 'rgba(255,215,0,0.05)' : 'transparent', transition:'background 0.15s'}}
-                                onMouseEnter={e => e.currentTarget.style.background = isP ? 'rgba(255,215,0,0.1)' : 'rgba(255,255,255,0.04)'}
-                                onMouseLeave={e => e.currentTarget.style.background = isP ? 'rgba(255,215,0,0.05)' : 'transparent'}>
-                                <td style={{padding:'8px 10px', display:'flex', alignItems:'center', gap:'8px'}}>
-                                    <span style={{display:'inline-block', width:'10px', height:'10px', borderRadius:'50%', background:color, flexShrink:0, boxShadow: isP ? '0 0 6px #FFD700' : 'none'}}></span>
-                                    <span style={{color: color, fontWeight: isP ? 700 : 500, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:'200px'}}>{fund.substring(0, 30)}</span>
-                                </td>
-                                {cols.map(c => {
-                                    const val = m[c.key];
-                                    return (
-                                        <td key={c.key} style={{padding:'8px 10px', textAlign:'right', fontWeight:600, fontVariantNumeric:'tabular-nums', color: val !== null ? c.color(val) : 'var(--text-secondary)'}}>
-                                            {val !== null ? `${val}${c.unit}` : '—'}
-                                        </td>
-                                    );
-                                })}
-                            </tr>
-                        );
-                    })}
-                </tbody>
-            </table>
-        </div>
-    );
-};
-
-// Interactive Chart — uses fundColorMap for consistent colors
-const InteractiveChart = ({ datasets, timeframe, activeFunds, customRange, fundColorMap }) => {
+// Interactive Chart (Finect-style with tooltip crosshair)
+const InteractiveChart = ({ datasets, timeframe, activeFunds, customRange }) => {
     const containerRef = React.useRef(null);
     const canvasRef = React.useRef(null);
     const overlayRef = React.useRef(null);
     const [tooltip, setTooltip] = useState(null);
     const [dimensions, setDimensions] = useState({ w: 800, h: 400 });
-    const PORTFOLIO_KEY = '📊 Mi Cartera Actual';
+
+    // Compute limit date from timeframe / custom range
     const getLimitDate = () => {
         if (customRange && customRange.from) return new Date(customRange.from);
         const d = new Date();
@@ -710,7 +355,8 @@ const InteractiveChart = ({ datasets, timeframe, activeFunds, customRange, fundC
         const endDate = getEndDate();
         let globalMin = 0, globalMax = 0, globalDateMin = Infinity, globalDateMax = -Infinity;
         const lines = [];
-        const PORTFOLIO_KEY = '📊 Mi Cartera Actual';
+        let idx = 0;
+        const PORTFOLIO_KEY = '📈 Mi Cartera';
 
         activeFunds.forEach(fund => {
             const raw = datasets[fund];
@@ -730,14 +376,13 @@ const InteractiveChart = ({ datasets, timeframe, activeFunds, customRange, fundC
                 if (ts > globalDateMax) globalDateMax = ts;
                 return { date: p.date, ts, pct, price: p.price };
             });
-            // Use fundColorMap for consistent colors between checkbox and chart
-            const color = fund === PORTFOLIO_KEY ? '#FFD700' : (fundColorMap ? fundColorMap[fund] : COLORS[0]) || COLORS[0];
             lines.push({
                 fund,
-                color,
+                color: fund === PORTFOLIO_KEY ? '#FFD700' : COLORS[idx % COLORS.length],
                 points: normalized,
                 isPortfolio: fund === PORTFOLIO_KEY,
             });
+            if (fund !== PORTFOLIO_KEY) idx++;
         });
 
         if (lines.length === 0) return null;
@@ -1012,45 +657,6 @@ const EvolutionTab = ({ rawData }) => {
         });
     }, [rawData]);
 
-    // Sort fund keys: portfolio first, then by portfolio weight (from rawData)
-    const allKeys = historyBatch ? Object.keys(historyBatch) : [];
-    const portfolioKey = allKeys.find(k => k.includes('Mi Cartera'));
-    const weightMap = React.useMemo(() => {
-        const map = {};
-        if (rawData && rawData.funds) {
-            rawData.funds.forEach(f => { if (f.Fondo) map[f.Fondo] = f.Porcentaje || 0; });
-        }
-        return map;
-    }, [rawData]);
-    const regularFunds = allKeys
-        .filter(k => !k.includes('Mi Cartera'))
-        .sort((a, b) => (weightMap[b] || 0) - (weightMap[a] || 0));
-    const allFunds = portfolioKey ? [portfolioKey, ...regularFunds] : regularFunds;
-
-    // MSCI World proxy key for Alpha/Beta calculation
-    const MSCI_KEYWORDS = ['msci world', 'world index'];
-    const benchmarkKey = regularFunds.find(k => MSCI_KEYWORDS.some(kw => k.toLowerCase().includes(kw))) || null;
-
-    // Build stable color map before any early returns (Rules of Hooks)
-    const fundColorMap = React.useMemo(() => {
-        const map = {};
-        allFunds.forEach((f, i) => {
-            if (f.includes('Mi Cartera')) {
-                map[f] = '#FFD700';
-            } else {
-                map[f] = COLORS[i % COLORS.length];
-            }
-        });
-        return map;
-    }, [allFunds.join(',')]);
-
-    // Compute client-side correlation BEFORE early returns (Rules of Hooks)
-    const clientCorrelation = React.useMemo(() => {
-        if (!historyBatch || activeFunds.length < 2) return null;
-        const { start, end } = getDateRange(showCustom ? null : timeframe, showCustom ? customRange : null);
-        return computeClientCorrelation(historyBatch, activeFunds, start, end);
-    }, [historyBatch, activeFunds.join(','), timeframe, showCustom, customRange.from, customRange.to]);
-
     if (loading) return (
         <div style={{padding:'3rem', textAlign:'center'}}>
             <div className="spinner" style={{margin:'0 auto 1rem'}}></div>
@@ -1060,12 +666,17 @@ const EvolutionTab = ({ rawData }) => {
 
     if (!historyBatch || Object.keys(historyBatch).length === 0) return (
         <div style={{padding:'2rem', textAlign:'center', color:'var(--text-secondary)'}}>
-            No hay datos históricos disponibles. Pulsa "Recalcular Cotizaciones" para generar los datos.
+            No hay datos históricos disponibles. Pulsa "Recalcular Morningstar" para generar los datos.
         </div>
     );
 
-    // Include Mi Cartera in correlation — all active funds
-    const corrFunds = activeFunds;
+    // Sort fund keys: portfolio first, then alphabetically
+    const allKeys = Object.keys(historyBatch);
+    const portfolioKey = allKeys.find(k => k.includes('Mi Cartera'));
+    const regularFunds = allKeys.filter(k => !k.includes('Mi Cartera')).sort();
+    const allFunds = portfolioKey ? [portfolioKey, ...regularFunds] : regularFunds;
+    // For correlation, exclude portfolio synthetic line
+    const corrFunds = activeFunds.filter(f => !f.includes('Mi Cartera'));
     const timeframes = ['1M', '3M', 'YTD', '1Y', '3Y', '5Y', '10Y', 'MAX'];
 
     const handleTimeframeClick = (tf) => {
@@ -1128,22 +739,10 @@ const EvolutionTab = ({ rawData }) => {
                     <strong style={{marginRight:'6px', fontSize:'0.85rem', alignSelf:'center'}}>Fondos:</strong>
                     <button onClick={() => setActiveFunds(allFunds)} style={{padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border-glass)', background:'transparent', color:'var(--text-secondary)', cursor:'pointer', fontSize:'0.72rem'}}>Todos</button>
                     <button onClick={() => setActiveFunds([])} style={{padding:'3px 10px', borderRadius:'12px', border:'1px solid var(--border-glass)', background:'transparent', color:'var(--text-secondary)', cursor:'pointer', fontSize:'0.72rem'}}>Ninguno</button>
-                    {/* dedicated📊 Mi Cartera Actual toggle */}
-                    {portfolioKey && (
-                        <button onClick={() => {
-                            const isActive = activeFunds.includes(portfolioKey);
-                            setActiveFunds(isActive ? activeFunds.filter(f => f !== portfolioKey) : [portfolioKey, ...activeFunds]);
-                        }} style={{
-                            padding:'4px 14px', borderRadius:'20px', cursor:'pointer', fontWeight:700, fontSize:'0.8rem', transition:'all 0.15s',
-                            border: activeFunds.includes(portfolioKey) ? '2px solid #FFD700' : '1px solid rgba(255,215,0,0.4)',
-                            background: activeFunds.includes(portfolioKey) ? 'rgba(255,215,0,0.18)' : 'transparent',
-                            color: activeFunds.includes(portfolioKey) ? '#FFD700' : 'rgba(255,215,0,0.6)',
-                            boxShadow: activeFunds.includes(portfolioKey) ? '0 0 10px rgba(255,215,0,0.3)' : 'none'
-                        }}>📊 Mi Cartera Actual</button>
-                    )}
-                    {regularFunds.map(fund => {
+                    {allFunds.map(fund => {
                         const isActive = activeFunds.includes(fund);
-                        const fundColor = fundColorMap[fund] || COLORS[0];
+                        const colorIdx = allFunds.indexOf(fund);
+                        const fundColor = COLORS[colorIdx % COLORS.length];
                         return (
                             <label key={fund} style={{
                                 display:'flex', alignItems:'center', gap:'5px', cursor:'pointer', fontSize:'0.8rem',
@@ -1168,30 +767,20 @@ const EvolutionTab = ({ rawData }) => {
                 Crecimiento Porcentual Acumulado
                 <span style={{fontSize:'0.75rem', color:'var(--text-secondary)', fontWeight:400}}>(base 100 al inicio del periodo)</span>
             </h3>
-            <InteractiveChart datasets={historyBatch} timeframe={timeframe} activeFunds={activeFunds} customRange={showCustom ? customRange : null} fundColorMap={fundColorMap} />
-
-            {/* Per-fund metrics for selected period */}
-            <h3 style={{marginTop:'2.5rem', marginBottom:'0.5rem', fontWeight:600}}>
-                Métricas del Periodo
-                <span style={{fontSize:'0.75rem', color:'var(--text-secondary)', fontWeight:400, marginLeft:'8px'}}>calculadas sobre la selección temporal activa · click en cabecera para ordenar</span>
-            </h3>
-            <div className="glass-panel" style={{padding:'1rem', overflowX:'auto'}}>
-                <FundMetricsTable historyBatch={historyBatch} activeFunds={activeFunds} timeframe={timeframe} customRange={showCustom ? customRange : {from:'', to:''}} fundColorMap={fundColorMap} benchmarkKey={benchmarkKey} />
-            </div>
+            <InteractiveChart datasets={historyBatch} timeframe={timeframe} activeFunds={activeFunds} customRange={showCustom ? customRange : null} />
 
             {/* Correlation */}
             <h3 style={{marginTop:'2.5rem', marginBottom:'0.5rem', fontWeight:600}}>Matriz de Correlación de Pearson</h3>
             <p style={{fontSize:'0.85rem', color:'var(--text-secondary)', marginBottom:'0.5rem'}}>
                 Valores cercanos a <span style={{color:'hsl(120,80%,40%)'}}>+1 (verde)</span> = fondos se mueven juntos.
                 Valores cercanos a <span style={{color:'hsl(0,80%,50%)'}}>-1 (rojo)</span> = descorrelacionados (protegen tu cartera).
-                <span style={{marginLeft:'8px', fontSize:'0.78rem', opacity:0.7}}>Calculada sobre el periodo seleccionado, incluye Mi Cartera.</span>
             </p>
             <div className="glass-panel" style={{padding:'1rem', overflowX:'auto'}}>
-                {clientCorrelation && clientCorrelation.labels && clientCorrelation.labels.length > 1 ? (
-                    <HeatmapRenderer data={clientCorrelation} activeFunds={corrFunds} />
+                {correlationMatrix && correlationMatrix.labels && correlationMatrix.labels.length > 0 ? (
+                    <HeatmapRenderer data={correlationMatrix} activeFunds={corrFunds} />
                 ) : (
                     <div style={{padding:'1rem', color:'var(--text-secondary)', textAlign:'center'}}>
-                        Datos insuficientes para la correlación en este periodo. Selecciona más fondos o amplía el rango.
+                        Matriz no disponible. Pulsa "Recalcular Morningstar" para generarla.
                     </div>
                 )}
             </div>
@@ -1211,22 +800,20 @@ const SimuladorTab = () => {
     const [loading, setLoading] = useState(false);
     const [searching, setSearching] = useState(false);
     const [fundDetail, setFundDetail] = useState(null);
-    const [simTimeframe, setSimTimeframe] = useState('MAX');
-    const [simCustomRange, setSimCustomRange] = useState({ from: '', to: '' });
-    const [showSimCustom, setShowSimCustom] = useState(false);
-    const debounceRef = React.useRef(null);
+    const [debounceTimer, setDebounceTimer] = useState(null);
 
     const handleSearch = (query) => {
         setSearchQuery(query);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
+        if (debounceTimer) clearTimeout(debounceTimer);
         if (query.length < 2) { setSearchResults([]); return; }
-        debounceRef.current = setTimeout(() => {
+        const timer = setTimeout(() => {
             setSearching(true);
             fetch(`/api/portfolio/fund/search?q=${encodeURIComponent(query)}&limit=15`)
                 .then(r => r.json())
                 .then(results => { setSearchResults(results); setSearching(false); })
                 .catch(() => setSearching(false));
         }, 300);
+        setDebounceTimer(timer);
     };
 
     const selectFund = (fund) => {
@@ -1382,110 +969,9 @@ const SimuladorTab = () => {
                         </div>
                     </div>
 
-                    {/* Simulation Chart */}
-                    {(simulation.history_current?.length > 2 || simulation.history_fund?.length > 2 || simulation.history_simulated?.length > 2) && (() => {
-                        const SIM_KEY_CURRENT = '📊 Mi Cartera Actual';
-                        const SIM_KEY_FUND = simulation.added_name || simulation.added_isin;
-                        const SIM_KEY_SIMULATED = '📈 Mi Cartera Simulada';
-                        const simDatasets = {};
-                        if (simulation.history_current?.length > 2) simDatasets[SIM_KEY_CURRENT] = simulation.history_current;
-                        if (simulation.history_fund?.length > 2) simDatasets[SIM_KEY_FUND] = simulation.history_fund;
-                        if (simulation.history_simulated?.length > 2) simDatasets[SIM_KEY_SIMULATED] = simulation.history_simulated;
-                        const simFunds = Object.keys(simDatasets);
-                        const simColorMap = {};
-                        simColorMap[SIM_KEY_CURRENT] = '#FFD700';
-                        simColorMap[SIM_KEY_FUND] = '#FF8C00';
-                        simColorMap[SIM_KEY_SIMULATED] = '#4ADE80';
-
-                        const SIM_TIMEFRAMES = ['1M','3M','YTD','1Y','3Y','5Y','10Y','MAX'];
-                        return (
-                            <div className="glass-panel" style={{padding:'1.5rem', marginBottom:'1.5rem'}}>
-                                <h4 style={{marginBottom:'1rem', fontWeight:600}}>📉 Evolución Histórica (base 100)</h4>
-                                {/* Period selector */}
-                                <div style={{display:'flex', gap:'6px', flexWrap:'wrap', marginBottom:'1rem'}}>
-                                    {SIM_TIMEFRAMES.map(tf => (
-                                        <button key={tf} onClick={() => { setSimTimeframe(tf); setShowSimCustom(false); setSimCustomRange({from:'',to:''}); }} style={{
-                                            padding:'4px 12px', borderRadius:'16px', cursor:'pointer', fontWeight:600, fontSize:'0.75rem',
-                                            border: simTimeframe === tf && !showSimCustom ? '1px solid var(--accent-glow)' : '1px solid var(--border-glass)',
-                                            background: simTimeframe === tf && !showSimCustom ? 'var(--accent-glow)' : 'transparent',
-                                            color: simTimeframe === tf && !showSimCustom ? '#000' : 'var(--text-primary)',
-                                            transition:'all 0.15s'
-                                        }}>{tf}</button>
-                                    ))}
-                                    <button onClick={() => setShowSimCustom(!showSimCustom)} style={{
-                                        padding:'4px 12px', borderRadius:'16px', cursor:'pointer', fontWeight:600, fontSize:'0.75rem',
-                                        border: showSimCustom ? '1px solid var(--accent-secondary)' : '1px solid var(--border-glass)',
-                                        background: showSimCustom ? 'var(--accent-secondary)' : 'transparent',
-                                        color: showSimCustom ? '#000' : 'var(--text-primary)',
-                                        transition:'all 0.15s'
-                                    }}>Personalizado</button>
-                                </div>
-                                {showSimCustom && (
-                                    <div style={{display:'flex', gap:'12px', marginBottom:'10px', alignItems:'center', flexWrap:'wrap'}}>
-                                        <label style={{fontSize:'0.8rem', color:'var(--text-secondary)'}}>Desde:
-                                            <input type="date" value={simCustomRange.from} onChange={e => setSimCustomRange({...simCustomRange, from:e.target.value})}
-                                                style={{marginLeft:'6px', padding:'4px 8px', borderRadius:'6px', border:'1px solid var(--border-glass)', background:'var(--bg-glass)', color:'white', fontSize:'0.8rem'}} />
-                                        </label>
-                                        <label style={{fontSize:'0.8rem', color:'var(--text-secondary)'}}>Hasta:
-                                            <input type="date" value={simCustomRange.to} onChange={e => setSimCustomRange({...simCustomRange, to:e.target.value})}
-                                                style={{marginLeft:'6px', padding:'4px 8px', borderRadius:'6px', border:'1px solid var(--border-glass)', background:'var(--bg-glass)', color:'white', fontSize:'0.8rem'}} />
-                                        </label>
-                                    </div>
-                                )}
-                                <InteractiveChart
-                                    datasets={simDatasets}
-                                    timeframe={simTimeframe}
-                                    activeFunds={simFunds}
-                                    customRange={showSimCustom ? simCustomRange : null}
-                                    fundColorMap={simColorMap}
-                                />
-                            </div>
-                        );
-                    })()}
-
-                    {/* Period Returns Table */}
-                    {simulation.period_returns?.length > 0 && (
-                        <div className="glass-panel" style={{padding:'1.5rem', marginBottom:'1.5rem'}}>
-                            <h4 style={{marginBottom:'1rem', fontWeight:600}}>📅 Rentabilidad por Período</h4>
-                            <div style={{overflowX:'auto'}}>
-                                <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.85rem'}}>
-                                    <thead>
-                                        <tr style={{borderBottom:'2px solid rgba(255,255,255,0.1)'}}>
-                                            <th style={{textAlign:'left', padding:'8px 12px', color:'var(--text-secondary)', fontWeight:600, fontSize:'0.75rem', textTransform:'uppercase'}}>Período</th>
-                                            <th style={{textAlign:'center', padding:'8px 12px', color:'var(--text-secondary)', fontWeight:600, fontSize:'0.75rem', textTransform:'uppercase'}}>Mi Cartera Actual</th>
-                                            <th style={{textAlign:'center', padding:'8px 12px', color:'#FF8C00', fontWeight:600, fontSize:'0.75rem', textTransform:'uppercase'}}>{(simulation.added_name || simulation.added_isin).substring(0,22)}</th>
-                                            <th style={{textAlign:'center', padding:'8px 12px', color:'#4ADE80', fontWeight:600, fontSize:'0.75rem', textTransform:'uppercase'}}>Mi Cartera Simulada</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {simulation.period_returns.map((row, i) => {
-                                            const fmtPct = (v) => v != null ? (
-                                                <span style={{color: v >= 0 ? 'var(--success)' : 'var(--danger)', fontWeight:700}}>
-                                                    {v >= 0 ? '+' : ''}{v.toFixed(1)}%{row.label.includes('Año') || row.label === 'Máx.' ? ' aa' : ''}
-                                                </span>
-                                            ) : <span style={{color:'var(--text-secondary)'}}>—</span>;
-                                            const delta = (row.simulated != null && row.current != null) ? row.simulated - row.current : null;
-                                            return (
-                                                <tr key={i} style={{borderBottom:'1px solid rgba(255,255,255,0.05)'}}>
-                                                    <td style={{padding:'8px 12px', fontWeight:600}}>{row.label}</td>
-                                                    <td style={{padding:'8px 12px', textAlign:'center', fontVariantNumeric:'tabular-nums'}}>{fmtPct(row.current)}</td>
-                                                    <td style={{padding:'8px 12px', textAlign:'center', fontVariantNumeric:'tabular-nums'}}>{fmtPct(row.fund)}</td>
-                                                    <td style={{padding:'8px 12px', textAlign:'center', fontVariantNumeric:'tabular-nums'}}>
-                                                        {fmtPct(row.simulated)}
-                                                        {delta != null && <span style={{fontSize:'0.72rem', color: delta >= 0 ? 'var(--success)' : 'var(--danger)', marginLeft:'6px'}}>({delta >= 0 ? '+' : ''}{delta.toFixed(2)}pp)</span>}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    )}
-
                     {/* Metrics Comparison Table */}
                     <div className="glass-panel" style={{padding:'1.5rem', marginBottom:'1.5rem'}}>
-                        <h4 style={{marginBottom:'1rem', fontWeight:600}}>📈 Métricas de Riesgo (calculadas desde series históricas)</h4>
+                        <h4 style={{marginBottom:'1rem', fontWeight:600}}>📈 Comparativa de Métricas (ponderadas por peso)</h4>
                         <div style={{display:'flex', justifyContent:'space-between', padding:'8px 12px', borderBottom:'2px solid rgba(255,255,255,0.1)', fontSize:'0.75rem', color:'var(--text-secondary)', textTransform:'uppercase', letterSpacing:'0.5px'}}>
                             <span style={{flex:1}}>Métrica</span>
                             <span style={{flex:1, textAlign:'center'}}>Actual</span>
@@ -1493,8 +979,11 @@ const SimuladorTab = () => {
                             <span style={{flex:'0 0 80px', textAlign:'right'}}>Δ Cambio</span>
                         </div>
                         {renderMetricComparison('Sharpe Ratio', simulation.current_portfolio_metrics.sharpe_ratio, simulation.simulated_portfolio_metrics.sharpe_ratio, signColor)}
-                        {renderMetricComparison('Volatilidad (%)', simulation.current_portfolio_metrics.standard_deviation, simulation.simulated_portfolio_metrics.standard_deviation, riskColor)}
-                        {renderMetricComparison('Máx Drawdown (%)', simulation.current_portfolio_metrics.max_drawdown, simulation.simulated_portfolio_metrics.max_drawdown, v => v > -10 ? 'var(--success)' : v > -25 ? 'var(--warning)' : 'var(--danger)')}
+                        {renderMetricComparison('Alpha', simulation.current_portfolio_metrics.alpha, simulation.simulated_portfolio_metrics.alpha, signColor)}
+                        {renderMetricComparison('Beta', simulation.current_portfolio_metrics.beta, simulation.simulated_portfolio_metrics.beta, null)}
+                        {renderMetricComparison('Volatilidad (Std Dev)', simulation.current_portfolio_metrics.standard_deviation, simulation.simulated_portfolio_metrics.standard_deviation, riskColor)}
+                        {renderMetricComparison('Máx Drawdown', simulation.current_portfolio_metrics.max_drawdown, simulation.simulated_portfolio_metrics.max_drawdown, v => v > -10 ? 'var(--success)' : v > -25 ? 'var(--warning)' : 'var(--danger)')}
+                        {renderMetricComparison('Tracking Error', simulation.current_portfolio_metrics.tracking_error, simulation.simulated_portfolio_metrics.tracking_error, riskColor)}
                     </div>
 
                     {/* Per-Fund Weight Changes */}
@@ -1537,277 +1026,83 @@ const SimuladorTab = () => {
 };
 
 
-// ---------------- TAB 5: Retirada de Fondos ----------------
-
-const RetiradasTab = () => {
-    const [targetAmount, setTargetAmount] = useState('');
-    const [plan, setPlan] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
-
-    const runOptimization = () => {
-        const amt = parseFloat(targetAmount);
-        if (!amt || amt <= 0) return;
-        setLoading(true);
-        setError(null);
-        fetch('/api/portfolio/tax-optimize', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ target_amount: amt })
-        })
-            .then(r => { if (!r.ok) throw new Error('Error en la API'); return r.json(); })
-            .then(result => { setPlan(result); setLoading(false); })
-            .catch(e => { setError(e.message); setLoading(false); });
-    };
-
-    const taxBrackets = [
-        { limit: 6000, rate: 19 },
-        { limit: 50000, rate: 21 },
-        { limit: 200000, rate: 23 },
-        { limit: 300000, rate: 27 },
-        { limit: Infinity, rate: 28 },
-    ];
-
-    const getTaxBreakdown = (capitalGain) => {
-        if (capitalGain <= 0) return [];
-        let remaining = capitalGain;
-        const breakdown = [];
-        let prevLimit = 0;
-        for (const bracket of taxBrackets) {
-            if (remaining <= 0) break;
-            const bracketSize = bracket.limit - prevLimit;
-            const aplicable = Math.min(remaining, bracketSize);
-            const tax = aplicable * (bracket.rate / 100);
-            breakdown.push({
-                range: bracket.limit === Infinity ? `>${prevLimit.toLocaleString('es-ES')}€` : `${prevLimit.toLocaleString('es-ES')}€ — ${bracket.limit.toLocaleString('es-ES')}€`,
-                rate: bracket.rate,
-                base: aplicable,
-                tax,
-            });
-            remaining -= aplicable;
-            prevLimit = bracket.limit;
-        }
-        return breakdown;
-    };
-
-    return (
-        <div>
-            <div className="glass-panel" style={{padding:'2rem', marginBottom:'1.5rem'}}>
-                <h3 style={{marginBottom:'1rem', fontWeight:600}}>💰 Retirada de Fondos — Optimización Fiscal</h3>
-                <p style={{fontSize:'0.85rem', color:'var(--text-secondary)', marginBottom:'1.5rem'}}>
-                    Calcula el plan de venta óptimo para minimizar impuestos sobre la ganancia patrimonial.
-                    Usa la estrategia FIFO (First In, First Out) y prioriza los lotes con menor plusvalía.
-                </p>
-
-                <div style={{display:'flex', gap:'12px', alignItems:'flex-end', flexWrap:'wrap'}}>
-                    <div style={{flex:'0 0 220px'}}>
-                        <label style={{display:'block', fontSize:'0.75rem', color:'var(--text-secondary)', marginBottom:'4px', textTransform:'uppercase', letterSpacing:'0.5px'}}>Importe a retirar (€)</label>
-                        <input
-                            type="number"
-                            min="100"
-                            step="1000"
-                            value={targetAmount}
-                            onChange={e => setTargetAmount(e.target.value)}
-                            placeholder="50000"
-                            style={{width:'100%', padding:'10px 14px', borderRadius:'8px', border:'1px solid var(--border-glass)', background:'var(--bg-glass)', color:'white', fontSize:'1rem'}}
-                        />
-                    </div>
-                    <button
-                        onClick={runOptimization}
-                        disabled={!targetAmount || loading}
-                        style={{
-                            padding:'10px 24px', height:'42px',
-                            background: !targetAmount ? 'var(--border-glass)' : 'linear-gradient(135deg, var(--warning), hsl(25, 90%, 50%))',
-                            color:'white', border:'none', borderRadius:'8px', fontWeight:700, cursor: !targetAmount ? 'not-allowed' : 'pointer',
-                            fontSize:'0.9rem', transition:'all 0.2s'
-                        }}>
-                        {loading ? 'Calculando...' : '💰 Optimizar Retirada'}
-                    </button>
-                </div>
-                {error && <div style={{marginTop:'12px', padding:'8px 14px', background:'rgba(220,50,50,0.15)', borderRadius:'8px', color:'var(--danger)', fontSize:'0.85rem'}}>{error}</div>}
-            </div>
-
-            {plan && (
-                <div>
-                    {/* Summary Cards */}
-                    <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(160px, 1fr))', gap:'1rem', marginBottom:'1.5rem'}}>
-                        <div className="glass-panel" style={{padding:'1rem', textAlign:'center'}}>
-                            <div style={{fontSize:'0.7rem', color:'var(--text-secondary)', textTransform:'uppercase'}}>Importe Retirado</div>
-                            <div style={{fontSize:'1.3rem', fontWeight:700, color:'var(--text-primary)'}}>€{plan.withdrawn_amount.toLocaleString('es-ES', {minimumFractionDigits:2})}</div>
-                        </div>
-                        <div className="glass-panel" style={{padding:'1rem', textAlign:'center'}}>
-                            <div style={{fontSize:'0.7rem', color:'var(--text-secondary)', textTransform:'uppercase'}}>Ganancia Patrimonial</div>
-                            <div style={{fontSize:'1.3rem', fontWeight:700, color: plan.total_capital_gain >= 0 ? 'var(--success)' : 'var(--danger)'}}>
-                                €{plan.total_capital_gain.toLocaleString('es-ES', {minimumFractionDigits:2})}
-                            </div>
-                        </div>
-                        <div className="glass-panel" style={{padding:'1rem', textAlign:'center'}}>
-                            <div style={{fontSize:'0.7rem', color:'var(--text-secondary)', textTransform:'uppercase'}}>Impuestos Estimados</div>
-                            <div style={{fontSize:'1.3rem', fontWeight:700, color:'var(--warning)'}}>€{plan.estimated_tax.toLocaleString('es-ES', {minimumFractionDigits:2})}</div>
-                        </div>
-                        <div className="glass-panel" style={{padding:'1rem', textAlign:'center'}}>
-                            <div style={{fontSize:'0.7rem', color:'var(--text-secondary)', textTransform:'uppercase'}}>Neto tras Impuestos</div>
-                            <div style={{fontSize:'1.3rem', fontWeight:700, color:'var(--accent-glow)'}}>€{plan.net_amount.toLocaleString('es-ES', {minimumFractionDigits:2})}</div>
-                        </div>
-                    </div>
-
-                    {/* Withdrawal Plan Table */}
-                    <div className="glass-panel" style={{padding:'1.5rem', marginBottom:'1.5rem'}}>
-                        <h4 style={{marginBottom:'1rem', fontWeight:600}}>📋 Plan de Venta Óptimo</h4>
-                        <div style={{overflowX:'auto'}}>
-                            <table style={{width:'100%', minWidth:'700px'}}>
-                                <thead>
-                                    <tr>
-                                        <th>Fondo</th>
-                                        <th>ISIN</th>
-                                        <th>Fecha Compra</th>
-                                        <th style={{textAlign:'right'}}>Participaciones</th>
-                                        <th style={{textAlign:'right'}}>Importe Venta</th>
-                                        <th style={{textAlign:'right'}}>Ganancia</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {plan.plan.map((step, idx) => (
-                                        <tr key={idx}>
-                                            <td style={{fontWeight:500}}>{step.Fondo}</td>
-                                            <td style={{fontSize:'0.8rem', color:'var(--text-secondary)'}}>{step.ISIN}</td>
-                                            <td style={{fontSize:'0.85rem'}}>{step.Fecha_Compra || '—'}</td>
-                                            <td style={{textAlign:'right', fontVariantNumeric:'tabular-nums'}}>{step.Participaciones_Vendidas.toFixed(4)}</td>
-                                            <td style={{textAlign:'right', fontWeight:600, fontVariantNumeric:'tabular-nums'}}>€{step.Importe_Retirado.toLocaleString('es-ES', {minimumFractionDigits:2})}</td>
-                                            <td style={{textAlign:'right', fontWeight:600, color: step.Ganancia_Patrimonial >= 0 ? 'var(--success)' : 'var(--danger)', fontVariantNumeric:'tabular-nums'}}>
-                                                {step.Ganancia_Patrimonial >= 0 ? '+' : ''}€{step.Ganancia_Patrimonial.toLocaleString('es-ES', {minimumFractionDigits:2})}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    {/* Tax Bracket Breakdown */}
-                    {plan.total_capital_gain > 0 && (
-                        <div className="glass-panel" style={{padding:'1.5rem'}}>
-                            <h4 style={{marginBottom:'1rem', fontWeight:600}}>🏛️ Desglose por Tramos Fiscales (Ahorro España 2024)</h4>
-                            <div style={{display:'flex', flexDirection:'column', gap:'8px'}}>
-                                {getTaxBreakdown(plan.total_capital_gain).map((bracket, idx) => (
-                                    <div key={idx} style={{display:'flex', alignItems:'center', gap:'12px', padding:'8px 12px', background:'rgba(0,0,0,0.15)', borderRadius:'8px'}}>
-                                        <span style={{flex:'0 0 200px', fontSize:'0.8rem', color:'var(--text-secondary)'}}>{bracket.range}</span>
-                                        <span style={{flex:'0 0 60px', fontWeight:700, color:'var(--warning)', fontSize:'0.9rem'}}>{bracket.rate}%</span>
-                                        <span style={{flex:1, fontSize:'0.85rem', fontVariantNumeric:'tabular-nums'}}>Base: €{bracket.base.toLocaleString('es-ES', {minimumFractionDigits:2})}</span>
-                                        <span style={{flex:'0 0 120px', textAlign:'right', fontWeight:600, color:'var(--danger)', fontVariantNumeric:'tabular-nums'}}>
-                                            -€{bracket.tax.toLocaleString('es-ES', {minimumFractionDigits:2})}
-                                        </span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-};
-
-
 // ---------------- MAIN DASHBOARD ----------------
 
 const Dashboard = () => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [refreshingNav, setRefreshingNav] = useState(false);
-    const [refreshingDetails, setRefreshingDetails] = useState(false);
-    const [activeTab, setActiveTab] = useState('general');
+    const [refreshing, setRefreshing] = useState(false);
+    const [activeTab, setActiveTab] = useState('general'); // general | detalles | evolucion | simulador
 
     const loadData = (endpoint = '/api/portfolio/summary') => {
+        if (endpoint.includes('enrich')) setRefreshing(true);
         fetch(endpoint)
             .then(res => res.json())
-            .then(json => { setData(json); setLoading(false); })
-            .catch(err => { console.error("Error fetching data:", err); setLoading(false); });
-    };
-
-    const handleRefreshNav = () => {
-        setRefreshingNav(true);
-        fetch('/api/portfolio/refresh-nav')
-            .then(res => res.json())
-            .then(json => { setData(json); setRefreshingNav(false); })
-            .catch(err => { console.error("Error refreshing NAVs:", err); setRefreshingNav(false); });
-    };
-
-    const handleRefreshDetails = () => {
-        setRefreshingDetails(true);
-        fetch('/api/portfolio/refresh-details')
-            .then(res => res.json())
-            .then(() => { setRefreshingDetails(false); })
-            .catch(err => { console.error("Error refreshing details:", err); setRefreshingDetails(false); });
+            .then(json => {
+                setData(json);
+                setLoading(false);
+                setRefreshing(false);
+            })
+            .catch(err => {
+                console.error("Error fetching data:", err);
+                setLoading(false);
+                setRefreshing(false);
+            });
     };
 
     useEffect(() => { loadData(); }, []);
 
-    if (loading) return <div className="loading-state"><div className="spinner"></div><p>Connecting...</p></div>;
+    if (loading) return <div className="loading-state"><div className="spinner"></div><p>Establishing Secure Connection...</p></div>;
     if (!data || !data.summary) return <div style={{padding:'2rem', color:'#ff4444'}}><h3>API Error / Database Empty</h3></div>;
 
     const chartData = Object.keys(data.summary.details).map(k => ({ name: k, value: data.summary.details[k] }));
-
-    const tabs = ['general', 'detalles', 'evolucion', 'simulador', 'retiradas'];
-    const tabLabels = { general: 'General', detalles: 'Detalles', evolucion: 'Evolución', simulador: 'Simulador', retiradas: 'Retiradas' };
 
     return (
         <div className="dashboard-container">
             <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:'1rem'}}>
                 <div>
-                    <h1>Portfolio Tracker</h1>
+                    <h1>Portfolio Tracker Pro</h1>
+                    <div style={{color: 'var(--success)'}}>🚀 Arquitectura SQL/JSON Local Integrada</div>
                 </div>
                 
                 {/* TABS NAVEGACIÓN */}
                 <div style={{display:'flex', gap:'5px', background:'rgba(0,0,0,0.3)', padding:'4px', borderRadius:'10px', border:'1px solid var(--border-glass)'}}>
-                    {tabs.map(tab => (
+                    {['general', 'detalles', 'evolucion', 'simulador'].map(tab => (
                         <button key={tab} onClick={() => setActiveTab(tab)} style={{
                             padding: '8px 16px', background: activeTab === tab ? 'var(--accent-glow)' : 'transparent',
                             color: activeTab === tab ? '#000' : 'var(--text-primary)', border: 'none', borderRadius: '8px',
-                            fontWeight: '600', cursor: 'pointer', transition: 'all 0.2s'
+                            fontWeight: '600', cursor: 'pointer', textTransform: 'capitalize', transition: 'all 0.2s'
                         }}>
-                            {tabLabels[tab]}
+                            {tab}
                         </button>
                     ))}
                 </div>
 
                 <button 
-                    onClick={handleRefreshNav}
-                    disabled={refreshingNav}
+                    onClick={() => loadData('/api/portfolio/enrich')}
+                    disabled={refreshing}
                     style={{
-                        padding: '10px 20px', background: refreshingNav ? 'var(--border-glass)' : 'var(--bg-glass)',
-                        color: refreshingNav ? 'var(--text-secondary)' : '#fff', border: '1px solid var(--border-glass)',
-                        borderRadius: '8px', fontWeight: '600', cursor: refreshingNav ? 'not-allowed' : 'pointer', transition: 'all 0.3s'
+                        padding: '10px 20px', background: refreshing ? 'var(--border-glass)' : 'var(--bg-glass)',
+                        color: refreshing ? 'var(--text-secondary)' : '#fff', border: '1px solid var(--border-glass)',
+                        borderRadius: '8px', fontWeight: '600', cursor: refreshing ? 'not-allowed' : 'pointer', transition: 'all 0.3s'
                     }}>
-                    {refreshingNav ? 'Sincronizando...' : '🔄 Recalcular Cotizaciones'}
+                    {refreshing ? 'Sincronizando...' : '🔄 Recalcular Morningstar'}
                 </button>
             </header>
             
             <div className="top-metrics">
                 <MetricCard title="Renta Variable (RV)" value={data.summary.total_rv.toFixed(2)} />
                 <MetricCard title="Renta Fija (RF)" value={data.summary.total_rf.toFixed(2)} />
+                <MetricCard title="Liquidez (Cash)" value={data.summary.total_cash.toFixed(2)} />
                 <MetricCard title="Alternativos" value={data.summary.total_alt.toFixed(2)} />
-                <MetricCard title="Indexado" value={(data.summary.total_indexed || 0).toFixed(2)} />
-                <MetricCard title="Activo" value={(data.summary.total_active || 0).toFixed(2)} />
             </div>
 
-            {/* CONTENIDO — display:none preserva estado entre pestañas */}
+            {/* CONTENIDO DE LA PESTAÑA */}
             <div style={{marginTop: '2rem'}}>
-                <div style={{display: activeTab === 'general' ? 'block' : 'none'}}>
-                    <GeneralTab data={data} chartData={chartData} reloadData={loadData} />
-                </div>
-                <div style={{display: activeTab === 'detalles' ? 'block' : 'none'}}>
-                    <DetailsTab onRefreshDetails={handleRefreshDetails} refreshingDetails={refreshingDetails} />
-                </div>
-                <div style={{display: activeTab === 'evolucion' ? 'block' : 'none'}}>
-                    <EvolutionTab rawData={data} />
-                </div>
-                <div style={{display: activeTab === 'simulador' ? 'block' : 'none'}}>
-                    <SimuladorTab />
-                </div>
-                <div style={{display: activeTab === 'retiradas' ? 'block' : 'none'}}>
-                    <RetiradasTab />
-                </div>
+                {activeTab === 'general' && <GeneralTab data={data} chartData={chartData} reloadData={loadData} />}
+                {activeTab === 'detalles' && <DetailsTab />}
+                {activeTab === 'evolucion' && <EvolutionTab rawData={data} />}
+                {activeTab === 'simulador' && <SimuladorTab />}
             </div>
         </div>
     );

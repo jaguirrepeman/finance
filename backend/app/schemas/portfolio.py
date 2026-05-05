@@ -18,6 +18,11 @@ class FundBase(BaseModel):
     Morningstar_Name: Optional[str] = Field(None, alias="Morningstar Name")
     Estrellas_MS: Optional[str] = Field(None, alias="Estrellas MS")
     Categoria: Optional[str] = Field(None, alias="Categoría")
+    IsIndex: Optional[bool] = None
+    Valor_Actual: Optional[float] = None
+    Capital_Invertido: Optional[float] = None
+    Ganancia_Abs: Optional[float] = None
+    Ganancia_Pct: Optional[float] = None
 
     class Config:
         populate_by_name = True
@@ -28,6 +33,8 @@ class PortfolioSummary(BaseModel):
     total_rf: float
     total_cash: float
     total_alt: float
+    total_indexed: Optional[float] = 0.0
+    total_active: Optional[float] = 0.0
     details: Dict[str, float]
 
 
@@ -93,6 +100,19 @@ class TaxOptimizeResponse(BaseModel):
     plan: List[TaxPlanStep]
 
 
+class FundMetrics(BaseModel):
+    """Métricas de riesgo/rendimiento de un fondo (fuente: Finect)."""
+    sharpe_ratio: Optional[float] = None
+    alpha: Optional[float] = None
+    beta: Optional[float] = None
+    standard_deviation: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    tracking_error: Optional[float] = None
+    information_ratio: Optional[float] = None
+    r2: Optional[float] = None
+    correlation: Optional[float] = None
+
+
 class FundDetailResponse(BaseModel):
     isin: str
     name: str = ""
@@ -101,7 +121,56 @@ class FundDetailResponse(BaseModel):
     inception_date: Optional[str] = None
     rating: Optional[Any] = None
     risk_score: Optional[Any] = None
+    srri: Optional[int] = None
+    category: Optional[str] = None
+    management_company: Optional[str] = None
+    metrics: Optional[FundMetrics] = None
     sectors: Dict[str, float] = {}
     countries: Dict[str, float] = {}
+    asset_allocation: Dict[str, float] = {}
+    market_cap: Dict[str, float] = {}
     holdings: List[Dict[str, Any]] = []
     source: str = ""
+
+
+class FundSearchResult(BaseModel):
+    """Resultado de búsqueda de un fondo en Finect."""
+    isin: str
+    name: str = ""
+    category: Optional[str] = None
+    management_company: Optional[str] = None
+    in_portfolio: bool = False
+
+
+class SimulationRequest(BaseModel):
+    """Petición de simulación: añadir X€ a un fondo."""
+    isin: str
+    amount: float = Field(..., gt=0, description="Cantidad a añadir en €")
+
+
+class SimulatedFundDetail(BaseModel):
+    """Detalle de un fondo en la simulación."""
+    isin: str
+    name: str = ""
+    current_weight: float = 0.0
+    simulated_weight: float = 0.0
+    amount: float = 0.0
+    metrics: Optional[FundMetrics] = None
+
+
+class SimulationResponse(BaseModel):
+    """Resultado de la simulación de añadir dinero a un fondo."""
+    added_isin: str
+    added_name: str = ""
+    added_amount: float
+    current_total: float
+    simulated_total: float
+    current_portfolio_metrics: Dict[str, Optional[float]] = {}
+    simulated_portfolio_metrics: Dict[str, Optional[float]] = {}
+    funds: List[SimulatedFundDetail] = []
+    # Historical series for chart [{date, price}] — base 100
+    history_current: List[Dict[str, Any]] = []
+    history_fund: List[Dict[str, Any]] = []
+    history_simulated: List[Dict[str, Any]] = []
+    # Period returns [{label, current, fund, simulated}] — % total or CAGR
+    period_returns: List[Dict[str, Any]] = []
