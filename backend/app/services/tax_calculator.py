@@ -1,6 +1,22 @@
+"""
+tax_calculator.py — Optimizador fiscal para retiradas de fondos.
+
+Implementa el algoritmo de retirada óptima:
+  1. Ordena lotes abiertos por ganancia patrimonial (menor primero).
+  2. Vende del lote con menor plusvalía para minimizar impuestos.
+  3. Calcula impuestos según tramos del ahorro España 2024:
+     - 19% hasta 6.000€
+     - 21% de 6.000 a 50.000€
+     - 23% de 50.000 a 200.000€
+     - 27% de 200.000 a 300.000€
+     - 28% más de 300.000€
+"""
+
 import logging
+from typing import Any, Dict, Optional
+
 import pandas as pd
-from typing import Dict, List, Any, Optional
+
 from .core_portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
@@ -18,43 +34,44 @@ class TaxOptimizer:
         self.current_prices: Dict[str, float] = dict(prices) if prices else {}
         
     def _fetch_current_prices(self):
-        """Obtiene precios para ISINs que aún no los tienen."""
-        missing = [isin for isin in self.portfolio.positions if isin not in self.current_prices or self.current_prices[isin] == 0]
+        """Obtiene precios actuales para ISINs que no los tienen.
+
+        Usa CompositeAsyncProvider (via sync wrapper) para obtener NAVs.
+        """
+        missing = [
+            isin for isin in self.portfolio.positions
+            if isin not in self.current_prices or self.current_prices[isin] == 0
+        ]
         if not missing:
             return
 
-        # Intentar primero con el proveedor ligero
         try:
-            from .data_providers import CompositeProvider
-            provider = CompositeProvider()
-            for isin in missing:
-                price = provider.get_nav(isin)
-                if price and price > 0:
-                    self.current_prices[isin] = price
-                else:
-                    self.current_prices.setdefault(isin, 0.0)
-            return
-        except Exception as e:
-            logger.warning("CompositeProvider fallback failed: %s", e)
+            import asyncio
+            import nest_asyncio
+            nest_asyncio.apply()
 
-        # Fallback: usar Fund (legacy, más lento)
-        try:
-            from .functions_fund import Fund
+            from .data_providers import CompositeAsyncProvider
+            from .cache_store import CacheStore
+
+            async def _fetch_navs():
+                provider = CompositeAsyncProvider(cache=CacheStore())
+                for isin in missing:
+                    try:
+                        price = await provider.get_nav(isin)
+                        if price and price > 0:
+                            self.current_prices[isin] = price
+                        else:
+                            self.current_prices.setdefault(isin, 0.0)
+                    except Exception as exc:
+                        logger.warning("Provider NAV(%s) failed: %s", isin, exc)
+                        self.current_prices.setdefault(isin, 0.0)
+
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(_fetch_navs())
+        except Exception as e:
+            logger.warning("_fetch_current_prices failed: %s", e)
             for isin in missing:
-                try:
-                    fund = Fund(isin=isin, mode="light", use_cache=True)
-                    df = fund.fund_data
-                    precio = 0.0
-                    if df is not None and not df.empty and "data" in df.columns:
-                        data_col = df["data"].iloc[0]
-                        if isinstance(data_col, pd.DataFrame) and "precio_actual" in data_col.columns:
-                            precio = float(data_col["precio_actual"].iloc[0])
-                    self.current_prices[isin] = precio
-                except Exception as exc:
-                    logger.warning("Fund(%s) failed: %s", isin, exc)
-                    self.current_prices.setdefault(isin, 0.0)
-        except ImportError:
-            pass
+                self.current_prices.setdefault(isin, 0.0)
             
     def calculate_taxes(self, capital_gain: float) -> float:
         """

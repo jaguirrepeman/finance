@@ -1,7 +1,7 @@
 [tool.poetry]
 package-mode = false
 name = "portfolio-tracker-api"
-version = "0.1.0"
+version = "0.2.0"
 description = "FastAPI backend for Portfolio Tracker Dashboard"
 authors = ["Admin <admin@example.com>"]
 
@@ -10,23 +10,22 @@ python = "^3.10"
 fastapi = "*"
 uvicorn = {extras = ["standard"], version = "*"}
 pandas = ">=2.0.0"
-mstarpy = ">=9.0.2"
-playwright = "*"
-plotly = "^6.7.0"
-seaborn = "^0.13.2"
-webdriver-manager = "^4.0.2"
-yfinance = "^1.2.2"
+numpy = "*"
 httpx = "^0.28.1"
 requests = "*"
+yfinance = "^1.2.2"
+beautifulsoup4 = "*"
+lxml = "*"
+mstarpy = ">=9.0.2"
 python-multipart = "*"
 openpyxl = "^3.1.5"
-jupyter = "^1.1.1"
-nbformat = "^5.10.4"
 nest-asyncio = "^1.6.0"
 aiosqlite = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
+jupyter = "^1.1.1"
+nbformat = "^5.10.4"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

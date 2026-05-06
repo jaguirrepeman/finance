@@ -21,7 +21,7 @@ import pandas as pd
 
 from .services.cache_store import CacheStore, TTL_NAV_HISTORY
 from .services.core_portfolio import Portfolio
-from .services.data_providers_async import CompositeAsyncProvider
+from .services.data_providers import CompositeAsyncProvider
 from .services.fund_classifier import FundType, classify_fund, is_index_fund
 from .services.tax_calculator import TaxOptimizer
 

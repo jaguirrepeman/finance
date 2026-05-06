@@ -1,45 +1,51 @@
 """
-data_providers.py — Abstracción multi-fuente de datos financieros.
+data_providers.py — Proveedores de datos financieros (async).
+
+Usa httpx.AsyncClient con connection pooling.
+Todos los métodos de I/O son ``async def``.
 
 Proveedores soportados:
-  - FMPProvider:     FinancialModelingPrep (free tier, 250 req/día)
-  - MStarProvider:   Wrapper de mstarpy / clase Fund existente
-  - YFinanceProvider: Yahoo Finance (NAV rápido)
-  - FinectProvider:  Scraping de Finect (info, comisiones, ratios, holdings)
-  - CompositeProvider: Estrategia dual — velocidad (NAV) vs completitud (datos)
+  - FinectAsyncProvider:   Finect (NAV, info, sectores, regiones, holdings, historial)
+  - FTAsyncProvider:       Financial Times (info, sectores, holdings)
+  - YFinanceAsyncProvider: Yahoo Finance via asyncio.to_thread (NAV, historial)
+  - FMPAsyncProvider:      FinancialModelingPrep (NAV, historial, info, sectores)
+  - CompositeAsyncProvider: Orquestador dual-strategy con asyncio.gather
 
 Estrategia de adquisición de datos:
-  1. **NAV / Precio actual** (prioridad: velocidad + frescura ⚡)
-     Cadena: Finect → YFinance → FMP → MorningStar(light)
-     - Finect: ~500ms, 1 HTTP + parse JSON, devuelve NAV + fecha exacta
-     - YFinance: ~300ms, period=5d, buena cobertura ISINs europeos
-     - FMP: ~300ms (si hay API key), 1 HTTP call
-     - MorningStar: ~2-5s, backup de último recurso
-     Early termination: si un proveedor devuelve NAV con fecha ≤ 3 días, se acepta.
-
-  2. **Histórico de precios** (prioridad: completitud)
-     Cadena: YFinance → FMP → MorningStar(light)
-     First-success: devuelve el primer resultado no vacío.
-
-  3. **Info / Sectores / Países / Holdings** (prioridad: completitud 📊)
-     Cadena: Finect → FT → YFinance → FMP
-     Para info: se fusionan TODOS los proveedores (primer valor no-nulo gana)
-     Para sectores/países/holdings: se fusionan priorizando el proveedor más completo
-
-Cada proveedor implementa la interfaz FundDataProvider.
+  1. NAV: Finect → YFinance → FMP (early termination si ≤3 días)
+  2. Historial: asyncio.gather(todos), "longest wins", merge complementario
+  3. Info/Sectores/Países/Holdings: asyncio.gather(_data_chain), merge/best
 """
 
-import logging
-import os
+import asyncio
 import json
+import logging
+import re
+import time
+import unicodedata
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote
 
 import pandas as pd
-import requests
+
+from .cache_store import (
+    TTL_FUND_INFO,
+    TTL_HOLDINGS,
+    TTL_NAV,
+    TTL_NAV_HISTORY,
+    TTL_NAMES,
+    TTL_REGIONS,
+    TTL_SECTORS,
+    TTL_SITEMAP,
+    CacheStore,
+)
+from .http_client import fetch_with_retry, get_http_client
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -47,487 +53,629 @@ logger = logging.getLogger(__name__)
 
 def _get_fmp_api_key() -> Optional[str]:
     """Lee la API key de FMP desde variable de entorno o config.json."""
+    import os
+
     key = os.environ.get("FMP_API_KEY")
     if key:
         return key
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "data", "config.json",
-    )
-    if os.path.exists(config_path):
-        with open(config_path, "r") as f:
+    config_path = Path(__file__).resolve().parent.parent.parent / "data" / "config.json"
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
             cfg = json.load(f)
             return cfg.get("FMP_API_KEY")
     return None
 
 
+# Clave pública de la API de Finect
+_FINECT_API_KEY = "OgcqanUxQ4S6Y5VVvnwlJayUuxeg8Ah5"
+_FINECT_API_BASE = "https://api.finect.com/v4"
+
+# Sitemaps de Finect
+_SITEMAP_URLS = [
+    "https://www.finect.com/v4/bff/sitemap/funds.xml",
+    "https://www.finect.com/v4/bff/sitemap/etfs.xml",
+]
+
+
 # ---------------------------------------------------------------------------
-# Interfaz base
+# Interfaz base async
 # ---------------------------------------------------------------------------
 
-class FundDataProvider(ABC):
-    """Interfaz que todo proveedor de datos de fondos debe implementar."""
+
+class AsyncFundDataProvider(ABC):
+    """Interfaz que todo proveedor async de datos de fondos debe implementar."""
 
     @abstractmethod
-    def get_nav(self, isin: str) -> Optional[float]:
+    async def get_nav(self, isin: str) -> Optional[float]:
         """Precio actual (NAV)."""
 
-    def get_nav_date(self, isin: str) -> Optional[str]:
-        """Fecha del último dato NAV disponible (YYYY-MM-DD). None si no disponible."""
+    async def get_nav_date(self, isin: str) -> Optional[str]:
+        """Fecha del último dato NAV (YYYY-MM-DD)."""
         return None
 
     @abstractmethod
-    def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        """Histórico de precios. Devuelve DataFrame con columnas [date, price]."""
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+        """Histórico de precios. Columnas: [date, price]."""
 
     @abstractmethod
-    def get_fund_info(self, isin: str) -> Dict[str, Any]:
-        """Info general: name, category, expense_ratio, aum, inception_date, rating, etc."""
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        """Info general del fondo."""
 
     @abstractmethod
-    def get_sector_weights(self, isin: str) -> Dict[str, float]:
-        """Distribución sectorial {sector_name: weight %}."""
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        """Distribución sectorial."""
 
     @abstractmethod
-    def get_country_weights(self, isin: str) -> Dict[str, float]:
-        """Distribución geográfica {country_name: weight %}."""
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
+        """Distribución geográfica."""
 
     @abstractmethod
-    def get_holdings(self, isin: str) -> pd.DataFrame:
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
         """Top holdings. Columnas: [name, ticker, weight, market_value]."""
 
 
 # ---------------------------------------------------------------------------
-# FMP Provider
+# Finect Async Provider
 # ---------------------------------------------------------------------------
 
-class FMPProvider(FundDataProvider):
-    """FinancialModelingPrep — free tier (250 req/día). Gran cobertura de ETFs."""
+# Helpers de parseo (sin I/O, reutilizados del módulo original)
 
-    BASE_URL = "https://financialmodelingprep.com/stable"
+def _clean_column_name(name: str) -> str:
+    name = name.lower()
+    name = "".join(
+        c for c in unicodedata.normalize("NFKD", name)
+        if unicodedata.category(c) != "Mn"
+    )
+    name = re.sub(r"\s+", "_", name)
+    name = re.sub(r"[^a-z0-9_]", "", name)
+    return name
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or _get_fmp_api_key()
+
+def _extract_header(model: Dict[str, Any]) -> Dict[str, Any]:
+    info: Dict[str, Any] = {}
+    if name := model.get("name"):
+        info["name"] = name
+    mc = model.get("managementCompany", {})
+    if mc and mc.get("name"):
+        info["management_company"] = mc["name"]
+    cat = model.get("category", {})
+    if cat and cat.get("name"):
+        info["category"] = cat["name"]
+        info["categoryName"] = cat["name"]
+    if desc := model.get("description"):
+        info["description"] = desc
+    if srri := model.get("srri"):
+        info["srri"] = srri
+    if tna := model.get("totalNetAsset"):
+        info["total_net_asset"] = tna
+    # Inception date: try managementStart at model level, then classes
+    launch = model.get("managementStart")
+    if not launch:
+        for cls in model.get("classes", []):
+            launch = cls.get("launchDate") or cls.get("managementStart")
+            if launch:
+                break
+    if launch:
+        # Normalize to YYYY-MM-DD
+        info["inception_date"] = str(launch)[:10]
+    return info
+
+
+def _extract_ratings(model: Dict[str, Any]) -> Dict[str, Any]:
+    ratings_data: Dict[str, Any] = {}
+    for r in model.get("ratings", []):
+        provider = r.get("provider", "unknown")
+        value = r.get("value")
+        if value is not None:
+            ratings_data[f"rating_{provider}"] = value
+    return ratings_data
+
+
+def _extract_fees(model: Dict[str, Any], isin: str) -> Dict[str, Any]:
+    fees: Dict[str, Any] = {}
+    _FEE_NAME_MAP = {
+        "mgr": "comision_de_gestion",
+        "ter": "total_expense_ratio",
+        "ogc": "ongoing_charge",
+        "red": "comision_de_reembolso",
+        "cus": "comision_de_custodia",
+        "suc": "comision_de_suscripcion",
+        "flo": "initial_charge",
+    }
+    for cls in model.get("classes", []):
+        if cls.get("isin") == isin:
+            cls_fees = cls.get("fees", {})
+            for fee_key, fee_data in cls_fees.items():
+                if fee_data and fee_data.get("value") is not None:
+                    mapped = _FEE_NAME_MAP.get(fee_key, fee_key)
+                    fees[mapped] = fee_data["value"]
+            break
+    return fees
+
+
+def _extract_stats(model: Dict[str, Any]) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {}
+    raw_stats = model.get("stats", {})
+    _PERIOD_MAP = {"M12": "1y", "M36": "3y", "M60": "5y", "M120": "10y"}
+    _METRIC_KEYS = (
+        "annualizedReturn", "sharpeRatio", "alpha", "beta",
+        "standardDeviation", "maxDrawdown", "trackingError",
+        "correlation", "informationRatio", "r2",
+    )
+    for key in _METRIC_KEYS:
+        periods = raw_stats.get(key, [])
+        if not periods:
+            continue
+        col_base = _clean_column_name(key)
+        for entry in periods:
+            period_code = entry.get("period", "")
+            suffix = _PERIOD_MAP.get(period_code)
+            if suffix:
+                stats[f"{col_base}_{suffix}"] = entry.get("value")
+        best = max(periods, key=lambda p: int(p.get("period", "M0")[1:]))
+        stats[col_base] = best.get("value")
+    return stats
+
+
+def _extract_breakdown(model: Dict[str, Any], breakdown_type: str) -> Dict[str, float]:
+    result: Dict[str, float] = {}
+    for b_block in model.get("breakdown", []):
+        if b_block.get("type") != breakdown_type:
+            continue
+        for item in b_block.get("items", []):
+            drawer = item.get("drawer", "")
+            values = item.get("values", {})
+            long_val = values.get("long", 0.0)
+            if long_val:
+                result[drawer] = round(long_val, 4)
+    return result
+
+
+def _extract_nav(model: Dict[str, Any], isin: str) -> tuple:
+    for cls in model.get("classes", []):
+        if cls.get("isin") == isin:
+            quote = cls.get("lastQuote") or {}
+            price = quote.get("price")
+            dt = quote.get("datetime")
+            if price is not None and price > 0:
+                return float(price), dt[:10] if dt else None
+    quote = model.get("lastQuote") or {}
+    price = quote.get("price")
+    dt = quote.get("datetime")
+    if price is not None and price > 0:
+        return float(price), dt[:10] if dt else None
+    return None, None
+
+
+def _extract_holdings(model: Dict[str, Any]) -> pd.DataFrame:
+    portfolio = model.get("portfolio", {})
+    holdings_list = portfolio.get("holdings", [])
+    if not holdings_list:
+        return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+    rows = []
+    for h in holdings_list:
+        rows.append({
+            "name": h.get("name", ""),
+            "ticker": h.get("isin", "") or "",
+            "weight": h.get("weight", 0.0),
+            "market_value": float(h.get("amount", 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def _parse_quotes_response(raw: Any) -> pd.DataFrame:
+    rows = []
+    if isinstance(raw, dict):
+        items = raw.get("items") or raw.get("data") or raw.get("quotes") or []
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return pd.DataFrame(columns=["date", "price"])
+
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            try:
+                ts = int(item[0])
+                price = float(item[1])
+                date_str = pd.Timestamp(ts, unit="ms").strftime("%Y-%m-%d")
+                rows.append({"date": date_str, "price": price})
+            except (ValueError, TypeError, OverflowError):
+                pass
+        elif isinstance(item, dict):
+            price = item.get("nav") or item.get("price") or item.get("close") or item.get("value")
+            date = item.get("date") or item.get("datetime") or item.get("timestamp")
+            if price is not None and date is not None:
+                try:
+                    if isinstance(date, (int, float)):
+                        date = pd.Timestamp(int(date), unit="ms").strftime("%Y-%m-%d")
+                    else:
+                        date = str(date)[:10]
+                    rows.append({"date": date, "price": float(price)})
+                except (ValueError, TypeError):
+                    pass
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "price"])
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+
+
+class FinectAsyncProvider(AsyncFundDataProvider):
+    """Proveedor async basado en el JSON INITIAL_STATE de Finect."""
+
+    def __init__(self, cache: CacheStore) -> None:
+        self._cache = cache
+        self._model_cache: Dict[str, Optional[Dict]] = {}
+        self._nav_date_cache: Dict[str, str] = {}
+        self._sitemap_index: Optional[Dict[str, str]] = None
+
+    async def _load_sitemap_index(self) -> Dict[str, str]:
+        """Carga el sitemap desde cache o lo descarga."""
+        if self._sitemap_index is not None:
+            return self._sitemap_index
+
+        # Intentar cache SQLite
+        cached = await self._cache.aget("finect:sitemap_index")
+        if cached:
+            self._sitemap_index = cached
+            return cached
+
+        # Descargar sitemaps
+        logger.info("Descargando sitemaps de Finect...")
+        index: Dict[str, str] = {}
+        isin_pattern = re.compile(
+            r"<loc>(https://www\.finect\.com/(?:fondos-inversion|etfs)/"
+            r"([A-Z]{2}[A-Z0-9]{9}\d)-[^<]+)</loc>"
+        )
+
+        for sitemap_url in _SITEMAP_URLS:
+            resp = await fetch_with_retry(sitemap_url)
+            if resp:
+                for match in isin_pattern.finditer(resp.text):
+                    url = match.group(1)
+                    isin_found = match.group(2)
+                    if isin_found not in index:
+                        index[isin_found] = url
+
+        if index:
+            await self._cache.aset("finect:sitemap_index", index, TTL_SITEMAP)
+            logger.info("Índice Finect guardado: %d ISINs", len(index))
+
+        self._sitemap_index = index
+        return index
+
+    async def _get_model(self, isin: str) -> Optional[Dict[str, Any]]:
+        """Obtiene el modelo JSON del fondo (cache en sesión + HTTP)."""
+        if isin in self._model_cache:
+            return self._model_cache[isin]
+
+        sitemap = await self._load_sitemap_index()
+        url = sitemap.get(isin)
+        if url is None:
+            self._model_cache[isin] = None
+            return None
+
+        resp = await fetch_with_retry(url)
+        if resp is None:
+            self._model_cache[isin] = None
+            return None
+
+        # Extraer window.INITIAL_STATE
+        match = re.search(r'window\.INITIAL_STATE\s*=\s*"([^"]+)"', resp.text)
+        if not match:
+            self._model_cache[isin] = None
+            return None
+
+        try:
+            raw = match.group(1)
+            decoded = unquote(raw).strip().rstrip(";").strip('"')
+            data = json.loads(decoded)
+            model = data.get("fund", {}).get("fund", {}).get("model")
+            self._model_cache[isin] = model
+            return model
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self._model_cache[isin] = None
+            return None
+
+    async def get_nav(self, isin: str) -> Optional[float]:
+        model = await self._get_model(isin)
+        if model is None:
+            return None
+        price, date_str = _extract_nav(model, isin)
+        if price is not None and date_str:
+            self._nav_date_cache[isin] = date_str
+        return price
+
+    async def get_nav_date(self, isin: str) -> Optional[str]:
+        if isin in self._nav_date_cache:
+            return self._nav_date_cache[isin]
+        model = await self._get_model(isin)
+        if model is None:
+            return None
+        _, date_str = _extract_nav(model, isin)
+        if date_str:
+            self._nav_date_cache[isin] = date_str
+        return date_str
+
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+        model = await self._get_model(isin)
+        if model is None:
+            return pd.DataFrame(columns=["date", "price"])
+
+        class_id: Optional[str] = None
+        for cls in model.get("classes", []):
+            if cls.get("isin") == isin:
+                class_id = cls.get("id")
+                break
+        if class_id is None:
+            class_id = model.get("id")
+        if class_id is None:
+            return pd.DataFrame(columns=["date", "price"])
+
+        start_date = (datetime.now() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+        url = (
+            f"{_FINECT_API_BASE}/products/collectives/funds/"
+            f"{class_id}/timeseries?start={start_date}"
+        )
+
+        resp = await fetch_with_retry(
+            url,
+            headers={"Accept": "application/json", "key": _FINECT_API_KEY},
+        )
+        if resp is None:
+            return pd.DataFrame(columns=["date", "price"])
+
+        ct = resp.headers.get("content-type", "")
+        if "json" not in ct:
+            return pd.DataFrame(columns=["date", "price"])
+
+        try:
+            raw = resp.json()
+            return _parse_quotes_response(raw)
+        except Exception:
+            return pd.DataFrame(columns=["date", "price"])
+
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        model = await self._get_model(isin)
+        if model is None:
+            return {}
+        info: Dict[str, Any] = {"isin": isin, "source": "Finect"}
+        info.update(_extract_header(model))
+        info.update(_extract_ratings(model))
+        info.update(_extract_fees(model, isin))
+        info.update(_extract_stats(model))
+        return info
+
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        model = await self._get_model(isin)
+        if model is None:
+            return {}
+        return _extract_breakdown(model, "stock-sector")
+
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
+        model = await self._get_model(isin)
+        if model is None:
+            return {}
+        return _extract_breakdown(model, "regional-exposure")
+
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
+        model = await self._get_model(isin)
+        if model is None:
+            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+        return _extract_holdings(model)
+
+    async def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+        model = await self._get_model(isin)
+        if model is None:
+            return {}
+        return _extract_breakdown(model, "asset-allocation")
+
+
+# ---------------------------------------------------------------------------
+# FT Async Provider
+# ---------------------------------------------------------------------------
+
+
+class FTAsyncProvider(AsyncFundDataProvider):
+    """Proveedor async para Financial Times (scraping HTML)."""
+
+    def __init__(self) -> None:
         self._symbol_cache: Dict[str, Optional[str]] = {}
 
-    @property
-    def available(self) -> bool:
-        return self.api_key is not None
-
-    def _get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
-        if not self.api_key:
-            return None
-        params = params or {}
-        params["apikey"] = self.api_key
-        url = f"{self.BASE_URL}/{endpoint}"
-        try:
-            resp = requests.get(url, params=params, timeout=15)
-            if resp.status_code == 200:
-                return resp.json()
-            logger.warning("FMP %s returned %s", endpoint, resp.status_code)
-        except Exception as e:
-            logger.warning("FMP request failed for %s: %s", endpoint, e)
-        return None
-
-    def resolve_symbol(self, isin: str) -> Optional[str]:
-        """Resuelve un ISIN a un ticker symbol de FMP.
-
-        Intenta primero por ISIN directo; si falla, busca por texto
-        usando el ISIN como query (útil para ETFs europeos).
-        """
+    async def _get_ft_symbol(self, isin: str) -> str:
         if isin in self._symbol_cache:
-            return self._symbol_cache[isin]
+            return self._symbol_cache[isin] or f"{isin}:EUR"
 
-        # 1. Búsqueda directa por ISIN
-        data = self._get("search-isin", {"isin": isin})
-        symbol = None
-        if data and isinstance(data, list) and len(data) > 0:
-            symbol = data[0].get("symbol")
-
-        # 2. Fallback: búsqueda por texto con el ISIN como query
-        if not symbol:
-            data = self._get("search", {"query": isin, "limit": "5"})
-            if data and isinstance(data, list):
-                for item in data:
-                    # Priorizar coincidencias cuyo ISIN o nombre contengan el query
-                    if item.get("isin") == isin or isin in (item.get("name") or ""):
-                        symbol = item.get("symbol")
-                        break
-                # Si no hay match exacto, usar el primer resultado
-                if not symbol and len(data) > 0:
-                    symbol = data[0].get("symbol")
-                    logger.info("FMP: no exact ISIN match, using first search result: %s", symbol)
-
-        self._symbol_cache[isin] = symbol
-        return symbol
-
-    def get_nav(self, isin: str) -> Optional[float]:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return None
-        data = self._get("quote-short", {"symbol": symbol})
-        if data and isinstance(data, list) and len(data) > 0:
-            return data[0].get("price")
-        return None
-
-    def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return pd.DataFrame(columns=["date", "price"])
-        start = (datetime.now() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
-        data = self._get(
-            "historical-price-eod/light",
-            {"symbol": symbol, "from": start},
+        resp = await fetch_with_retry(
+            f"https://markets.ft.com/data/searchapi/searchsecurities?query={isin}"
         )
-        if not data or not isinstance(data, list):
-            return pd.DataFrame(columns=["date", "price"])
-        df = pd.DataFrame(data)
-        if "date" in df.columns and "close" in df.columns:
-            df = df.rename(columns={"close": "price"})[["date", "price"]]
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-            return df
-        return pd.DataFrame(columns=["date", "price"])
-
-    def get_fund_info(self, isin: str) -> Dict[str, Any]:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return {}
-        info = self._get("etf/info", {"symbol": symbol})
-        if info and isinstance(info, list) and len(info) > 0:
-            item = info[0]
-            return {
-                "name": item.get("name", ""),
-                "symbol": symbol,
-                "expense_ratio": item.get("expenseRatio"),
-                "aum": item.get("aum"),
-                "inception_date": item.get("inceptionDate"),
-                "description": item.get("description", ""),
-                "domicile": item.get("domicile", ""),
-                "currency": item.get("currency", "EUR"),
-                "source": "FMP",
-            }
-        # Fallback: try company profile
-        profile = self._get("profile", {"symbol": symbol})
-        if profile and isinstance(profile, list) and len(profile) > 0:
-            item = profile[0]
-            return {
-                "name": item.get("companyName", ""),
-                "symbol": symbol,
-                "sector": item.get("sector", ""),
-                "industry": item.get("industry", ""),
-                "currency": item.get("currency", "EUR"),
-                "source": "FMP",
-            }
-        return {}
-
-    def get_sector_weights(self, isin: str) -> Dict[str, float]:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return {}
-        data = self._get("etf/sector-weightings", {"symbol": symbol})
-        if data and isinstance(data, list):
-            return {item["sector"]: item["weightPercentage"] for item in data if "sector" in item}
-        return {}
-
-    def get_country_weights(self, isin: str) -> Dict[str, float]:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return {}
-        data = self._get("etf/country-weightings", {"symbol": symbol})
-        if data and isinstance(data, list):
-            return {item["country"]: item["weightPercentage"] for item in data if "country" in item}
-        return {}
-
-    def get_holdings(self, isin: str) -> pd.DataFrame:
-        symbol = self.resolve_symbol(isin)
-        if not symbol:
-            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-        data = self._get("etf/holdings", {"symbol": symbol})
-        if data and isinstance(data, list):
-            rows = []
-            for h in data[:25]:  # top 25
-                rows.append({
-                    "name": h.get("name", ""),
-                    "ticker": h.get("asset", ""),
-                    "weight": h.get("weightPercentage", 0),
-                    "market_value": h.get("marketValue", 0),
-                })
-            return pd.DataFrame(rows)
-        return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-
-
-# ---------------------------------------------------------------------------
-# MorningStar Provider (via existing Fund class)
-# ---------------------------------------------------------------------------
-
-class MStarProvider(FundDataProvider):
-    """Wrapper sobre la clase Fund existente (mstarpy + yfinance)."""
-
-    def __init__(self, cache_path: Optional[str] = None, use_cache: bool = True):
-        self.cache_path = cache_path
-        self.use_cache = use_cache
-
-    def _get_fund(self, isin: str, mode: str = "light", use_cache: Optional[bool] = None):
-        from .functions_fund import Fund
-        cache = use_cache if use_cache is not None else self.use_cache
-        return Fund(isin=isin, mode=mode, cache_path=self.cache_path, use_cache=cache)
-
-    @staticmethod
-    def _has_error(fund) -> bool:
-        """Detecta si los datos cacheados del fondo contienen un error."""
-        df = fund.fund_data
-        if df is None or df.empty:
-            return True
-        data_col = df["data"].iloc[0]
-        if isinstance(data_col, pd.DataFrame) and "error" in data_col.columns:
-            return data_col["error"].notna().any()
-        return False
-
-    def _get_fund_with_retry(self, isin: str, mode: str = "light") -> "Fund":  # noqa: F821
-        """Obtiene un Fund; si el cache contiene errores, reintenta sin cache."""
-        fund = self._get_fund(isin, mode=mode)
-        if self._has_error(fund):
-            logger.info("MStarProvider: cache de %s (%s) contiene errores, reintentando sin cache", isin, mode)
-            fund = self._get_fund(isin, mode=mode, use_cache=False)
-        return fund
-
-    def _extract_price(self, fund) -> float:
-        df = fund.fund_data
-        if df is None or df.empty:
-            return 0.0
-        data_col = df["data"].iloc[0]
-        if isinstance(data_col, list):
+        if resp:
             try:
-                data_col = pd.DataFrame(data_col)
+                data = resp.json()
+                securities = data.get("data", {}).get("security", [])
+                if securities:
+                    symbol = securities[0].get("symbol")
+                    if symbol:
+                        self._symbol_cache[isin] = symbol
+                        return symbol
             except Exception:
-                return 0.0
-        if isinstance(data_col, pd.DataFrame) and "precio_actual" in data_col.columns:
-            val = data_col["precio_actual"].iloc[0]
-            if pd.notna(val):
-                return float(val)
-        return 0.0
+                pass
 
-    def get_nav(self, isin: str) -> Optional[float]:
-        """NAV actual — siempre obtiene precio fresco, sin caché de disco."""
-        try:
-            fund = self._get_fund(isin, mode="light", use_cache=False)
-            price = self._extract_price(fund)
-            return price if price > 0 else None
-        except Exception as e:
-            logger.warning("MStarProvider.get_nav(%s) failed: %s", isin, e)
-            return None
+        self._symbol_cache[isin] = None
+        return f"{isin}:EUR"
 
-    def get_nav_date(self, isin: str) -> Optional[str]:
-        """Última fecha de NAV disponible en el histórico cacheado."""
-        try:
-            fund = self._get_fund(isin, mode="light")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return None
-            # Intentar extraer del histórico (columna historical_data)
-            if "historical_data" in df.columns:
-                hist = df["historical_data"].iloc[0]
-                if isinstance(hist, pd.DataFrame) and not hist.empty:
-                    last_idx = hist.index[-1]
-                    try:
-                        return last_idx.date().isoformat()
-                    except AttributeError:
-                        return str(last_idx)[:10]
-            # Fallback: fecha_actualizacion en data_col
-            data_col = df["data"].iloc[0]
-            if isinstance(data_col, pd.DataFrame) and "fecha_actualizacion" in data_col.columns:
-                val = data_col["fecha_actualizacion"].iloc[0]
-                if pd.notna(val):
-                    return str(val)[:10]
-        except Exception as e:
-            logger.debug("MStarProvider.get_nav_date(%s) failed: %s", isin, e)
+    async def _fetch_soup(self, url: str):
+        from bs4 import BeautifulSoup
+
+        resp = await fetch_with_retry(url)
+        if resp and len(resp.text) > 70000:
+            return BeautifulSoup(resp.text, "html.parser")
         return None
 
-    def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+    async def get_nav(self, isin: str) -> Optional[float]:
+        symbol = await self._get_ft_symbol(isin)
+        soup = await self._fetch_soup(
+            f"https://markets.ft.com/data/funds/tearsheet/summary?s={symbol}"
+        )
+        if not soup:
+            return None
         try:
-            fund = self._get_fund(isin, mode="light")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return pd.DataFrame(columns=["date", "price"])
-            hist = df["historical_data"].iloc[0]
-            if isinstance(hist, pd.DataFrame) and not hist.empty and "Close" in hist.columns:
-                result = hist.reset_index()
-                # Normalize column names
-                if "Date" in result.columns:
-                    result = result.rename(columns={"Date": "date", "Close": "price"})
-                else:
-                    result.columns = ["date"] + list(result.columns[1:])
-                    if "Close" in result.columns:
-                        result = result.rename(columns={"Close": "price"})
-                    elif "price" not in result.columns:
-                        result["price"] = result.iloc[:, 1]
-                result["date"] = pd.to_datetime(result["date"]).dt.tz_localize(None)
-                cutoff = datetime.now() - timedelta(days=years * 365)
-                result = result[result["date"] >= cutoff]
-                return result[["date", "price"]].reset_index(drop=True)
-        except Exception as e:
-            logger.warning("MStarProvider.get_nav_history(%s) failed: %s", isin, e)
+            price_elem = soup.find("span", class_="mod-ui-data-list__value")
+            if price_elem:
+                return float(price_elem.text.replace(",", ""))
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "price"])
 
-    def get_fund_info(self, isin: str) -> Dict[str, Any]:
-        try:
-            fund = self._get_fund_with_retry(isin, mode="detailed")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return {}
-            info: Dict[str, Any] = {"isin": isin, "source": "Morningstar"}
-
-            # El nombre real está en la columna 'nombre' del DataFrame principal
-            if "nombre" in df.columns:
-                val = df["nombre"].iloc[0]
-                if pd.notna(val) and str(val) != isin:
-                    info["name"] = str(val)
-
-            data_col = df["data"].iloc[0]
-
-            # Normalizar data_col: si es una lista de dicts, convertir a DataFrame
-            if isinstance(data_col, list):
-                try:
-                    data_col = pd.DataFrame(data_col)
-                except Exception:
-                    data_col = {}
-
-            if isinstance(data_col, pd.DataFrame) and not data_col.empty:
-                # Si no tenemos nombre aún, intentar desde la tabla de datos
-                if "name" not in info or info["name"] == isin:
-                    for name_key in ("name", "fundName"):
-                        if name_key in data_col.columns:
-                            val = data_col[name_key].iloc[0]
-                            if pd.notna(val) and str(val) != isin:
-                                info["name"] = str(val)
-                                break
-
-                # Extraer métricas adicionales
-                for key in [
-                    "overallMorningstarRating", "morningstarRatingFor3Year",
-                    "morningstarRatingFor5Year", "riskScore", "riskLevel",
-                    "ongoingCostsOtherCosts", "categoryName", "fundName",
-                ]:
-                    if key in data_col.columns:
-                        val = data_col[key].iloc[0]
-                        if pd.notna(val):
-                            info[key] = val
-
-            elif isinstance(data_col, dict):
-                if "name" not in info or info["name"] == isin:
-                    name = data_col.get("name")
-                    if name and name != isin:
-                        info["name"] = name
-                for key in ["overallMorningstarRating", "categoryName", "riskScore"]:
-                    if key in data_col and data_col[key] is not None:
-                        info[key] = data_col[key]
-
-            # Asegurar que siempre haya un nombre
-            info.setdefault("name", isin)
-
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        symbol = await self._get_ft_symbol(isin)
+        soup = await self._fetch_soup(
+            f"https://markets.ft.com/data/funds/tearsheet/summary?s={symbol}"
+        )
+        info: Dict[str, Any] = {"source": "FinancialTimes"}
+        if not soup:
             return info
-        except Exception as e:
-            logger.warning("MStarProvider.get_fund_info(%s) failed: %s", isin, e)
-            return {}
 
-    def get_sector_weights(self, isin: str) -> Dict[str, float]:
         try:
-            fund = self._get_fund_with_retry(isin, mode="detailed")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return {}
-            data_col = df["data"].iloc[0]
-            if isinstance(data_col, list):
-                try:
-                    data_col = pd.DataFrame(data_col)
-                except Exception:
-                    return {}
-            if isinstance(data_col, pd.DataFrame):
-                sector_cols = [c for c in data_col.columns if c.startswith("perc_sector_")]
-                result = {}
-                for col in sector_cols:
-                    name = col.replace("perc_sector_", "")
-                    val = data_col[col].iloc[0]
-                    if pd.notna(val):
-                        result[name] = float(val)
-                return result
+            title_elem = soup.find("h1", class_="mod-tearsheet-overview__header__name")
+            if title_elem:
+                info["name"] = title_elem.text.strip()
+            for tbl in soup.find_all("table"):
+                text = tbl.get_text()
+                if "Ongoing charge" in text or "Fund type" in text:
+                    for row in tbl.find_all("tr"):
+                        th = row.find("th")
+                        td = row.find("td")
+                        if th and td:
+                            k = th.text.strip().lower()
+                            v = td.text.strip()
+                            if "ongoing charge" in k:
+                                info["ongoing_charge"] = v
+                            elif "initial charge" in k:
+                                info["initial_charge"] = v
+                            elif "fund type" in k:
+                                info["category"] = v
         except Exception as e:
-            logger.warning("MStarProvider.get_sector_weights(%s) failed: %s", isin, e)
-        return {}
+            logger.debug("FTAsyncProvider: Error parsing info for %s: %s", isin, e)
+        return info
 
-    def get_country_weights(self, isin: str) -> Dict[str, float]:
-        try:
-            fund = self._get_fund_with_retry(isin, mode="detailed")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return {}
-            data_col = df["data"].iloc[0]
-            if isinstance(data_col, list):
-                try:
-                    data_col = pd.DataFrame(data_col)
-                except Exception:
-                    return {}
-            if isinstance(data_col, pd.DataFrame):
-                region_cols = [c for c in data_col.columns if c.startswith("perc_region_")]
-                result = {}
-                for col in region_cols:
-                    name = col.replace("perc_region_", "")
-                    val = data_col[col].iloc[0]
-                    if pd.notna(val):
-                        result[name] = float(val)
-                return result
-        except Exception as e:
-            logger.warning("MStarProvider.get_country_weights(%s) failed: %s", isin, e)
-        return {}
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        symbol = await self._get_ft_symbol(isin)
+        soup = await self._fetch_soup(
+            f"https://markets.ft.com/data/funds/tearsheet/holdings?s={symbol}"
+        )
+        sectors: Dict[str, float] = {}
+        if not soup:
+            return sectors
 
-    def get_holdings(self, isin: str) -> pd.DataFrame:
         try:
-            fund = self._get_fund_with_retry(isin, mode="detailed")
-            df = fund.fund_data
-            if df is None or df.empty:
-                return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-            data_col = df["data"].iloc[0]
-            if isinstance(data_col, list):
-                try:
-                    data_col = pd.DataFrame(data_col)
-                except Exception:
-                    return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-            if isinstance(data_col, pd.DataFrame):
-                holding_cols = [c for c in data_col.columns if c.startswith("perc_holding_")]
-                if holding_cols:
-                    rows = []
-                    for col in holding_cols:
-                        name = col.replace("perc_holding_", "")
-                        val = data_col[col].iloc[0]
-                        if pd.notna(val):
-                            rows.append({"name": name, "ticker": "", "weight": float(val), "market_value": 0})
-                    return pd.DataFrame(rows)
+            for tbl in soup.find_all("table"):
+                headers = [th.text.strip().lower() for th in tbl.find_all("th")]
+                if "sector" in headers and "% net assets" in headers:
+                    first_td = tbl.find("td")
+                    if first_td:
+                        txt = first_td.text.lower()
+                        if any(kw in txt for kw in ("technology", "financial", "cyclical", "industrial", "energy")):
+                            for row in tbl.find_all("tr"):
+                                tds = row.find_all("td")
+                                if len(tds) >= 2:
+                                    name = tds[0].text.strip()
+                                    val_str = tds[1].text.strip().replace("%", "")
+                                    try:
+                                        sectors[name] = float(val_str)
+                                    except ValueError:
+                                        pass
+                            break
         except Exception as e:
-            logger.warning("MStarProvider.get_holdings(%s) failed: %s", isin, e)
-        return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+            logger.debug("FTAsyncProvider: Error parsing sectors for %s: %s", isin, e)
+        return sectors
+
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
+        symbol = await self._get_ft_symbol(isin)
+        soup = await self._fetch_soup(
+            f"https://markets.ft.com/data/funds/tearsheet/holdings?s={symbol}"
+        )
+        regions: Dict[str, float] = {}
+        if not soup:
+            return regions
+
+        try:
+            for tbl in soup.find_all("table"):
+                headers = [th.text.strip().lower() for th in tbl.find_all("th")]
+                if "sector" in headers and "% net assets" in headers:
+                    first_td = tbl.find("td")
+                    if first_td:
+                        txt = first_td.text.lower()
+                        if any(kw in txt for kw in ("eurozone", "america", "europe", "asia", "kingdom", "market", "state")):
+                            for row in tbl.find_all("tr"):
+                                tds = row.find_all("td")
+                                if len(tds) >= 2:
+                                    name = tds[0].text.strip()
+                                    val_str = tds[1].text.strip().replace("%", "")
+                                    try:
+                                        regions[name] = float(val_str)
+                                    except ValueError:
+                                        pass
+                            break
+        except Exception as e:
+            logger.debug("FTAsyncProvider: Error parsing countries for %s: %s", isin, e)
+        return regions
+
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
+        symbol = await self._get_ft_symbol(isin)
+        soup = await self._fetch_soup(
+            f"https://markets.ft.com/data/funds/tearsheet/holdings?s={symbol}"
+        )
+        rows: List[Dict] = []
+        if not soup:
+            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+        try:
+            for tbl in soup.find_all("table"):
+                headers = [th.text.strip().lower() for th in tbl.find_all("th")]
+                if "company" in headers and "portfolio weight" in headers:
+                    for row in tbl.find_all("tr"):
+                        tds = row.find_all("td")
+                        if len(tds) >= 3:
+                            name_ticker = tds[0].text.strip()
+                            weight_str = tds[2].text.strip().replace("%", "")
+                            name = name_ticker
+                            ticker = ""
+                            ticker_span = tds[0].find("span", class_="mod-ui-symbol-and-name__symbol")
+                            if ticker_span:
+                                ticker = ticker_span.text.strip()
+                                name = name.replace(ticker, "").strip()
+                            try:
+                                weight = float(weight_str)
+                                rows.append({"name": name, "ticker": ticker, "weight": weight, "market_value": 0.0})
+                            except ValueError:
+                                pass
+                    break
+        except Exception as e:
+            logger.debug("FTAsyncProvider: Error parsing holdings for %s: %s", isin, e)
+
+        if not rows:
+            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+        return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# Yahoo Finance Provider (lightweight — NAV only)
+# YFinance Async Provider (via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
-class YFinanceProvider(FundDataProvider):
-    """Proveedor ligero de último recurso: NAV y NAV histórico via yfinance.
 
-    Características de velocidad:
-      - get_nav: ~200-500ms (descarga 5 días de historia y toma el último cierre)
-      - get_nav_history: ~500-2000ms dependiendo del período
+class YFinanceAsyncProvider(AsyncFundDataProvider):
+    """Wrapper async sobre yfinance (sync) usando asyncio.to_thread."""
 
-    Es el primer proveedor en la cadena NAV por su buen balance
-    entre velocidad y cobertura de ISINs europeos.
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._last_nav_dates: Dict[str, str] = {}
 
-    def get_nav(self, isin: str) -> Optional[float]:
-        try:
+    async def get_nav(self, isin: str) -> Optional[float]:
+        def _sync():
             import yfinance as yf
             ticker = yf.Ticker(isin)
             hist = ticker.history(period="5d")
@@ -539,15 +687,19 @@ class YFinanceProvider(FundDataProvider):
                     date_str = str(last_idx)[:10]
                 self._last_nav_dates[isin] = date_str
                 return float(hist["Close"].iloc[-1])
-        except Exception as e:
-            logger.debug("YFinanceProvider.get_nav(%s) failed: %s", isin, e)
-        return None
+            return None
 
-    def get_nav_date(self, isin: str) -> Optional[str]:
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception as e:
+            logger.debug("YFinanceAsync.get_nav(%s) failed: %s", isin, e)
+            return None
+
+    async def get_nav_date(self, isin: str) -> Optional[str]:
         return self._last_nav_dates.get(isin)
 
-    def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        try:
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+        def _sync():
             import yfinance as yf
             period_map = {1: "1y", 3: "3y", 5: "5y", 10: "10y"}
             period = period_map.get(years, f"{years}y")
@@ -559,12 +711,16 @@ class YFinanceProvider(FundDataProvider):
                 )
                 df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
                 return df.reset_index(drop=True)
-        except Exception as e:
-            logger.debug("YFinanceProvider.get_nav_history(%s) failed: %s", isin, e)
-        return pd.DataFrame(columns=["date", "price"])
+            return pd.DataFrame(columns=["date", "price"])
 
-    def get_fund_info(self, isin: str) -> Dict[str, Any]:
         try:
+            return await asyncio.to_thread(_sync)
+        except Exception as e:
+            logger.debug("YFinanceAsync.get_nav_history(%s) failed: %s", isin, e)
+            return pd.DataFrame(columns=["date", "price"])
+
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        def _sync():
             import yfinance as yf
             ticker = yf.Ticker(isin)
             info = ticker.info or {}
@@ -573,182 +729,208 @@ class YFinanceProvider(FundDataProvider):
                 "currency": info.get("currency", "EUR"),
                 "source": "YahooFinance",
             }
+
+        try:
+            return await asyncio.to_thread(_sync)
         except Exception:
             return {}
 
-    def get_sector_weights(self, isin: str) -> Dict[str, float]:
-        try:
-            ticker = self._get_ticker(isin)
-            if not ticker: return {}
-            fd = getattr(ticker, "funds_data", None)
-            if fd and hasattr(fd, "sector_weightings"):
-                return fd.sector_weightings
-        except: pass
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        # yfinance sector_weightings is unreliable for EU funds
         return {}
 
-    def get_country_weights(self, isin: str) -> Dict[str, float]:
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
         return {}
 
-    def get_holdings(self, isin: str) -> pd.DataFrame:
-        try:
-            ticker = self._get_ticker(isin)
-            if not ticker: return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-            fd = getattr(ticker, "funds_data", None)
-            if fd and hasattr(fd, "top_holdings"):
-                h = fd.top_holdings
-                if h is not None and not h.empty:
-                    rows = []
-                    for sym, row in h.iterrows():
-                        rows.append({
-                            "name": row.get("Name", ""),
-                            "ticker": sym if str(sym) != "nan" else "",
-                            "weight": row.get("Holding Percent", 0),
-                            "market_value": 0
-                        })
-                    return pd.DataFrame(rows)
-        except Exception as e:
-            logger.debug("YFinanceProvider.get_holdings failed for %s: %s", isin, e)
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
 
-    def get_asset_allocation(self, isin: str) -> Dict[str, float]:
-        try:
-            ticker = self._get_ticker(isin)
-            if not ticker: return {}
-            fd = getattr(ticker, "funds_data", None)
-            if fd and hasattr(fd, "asset_classes"):
-                return fd.asset_classes
-        except: pass
-        return {}
-
 
 # ---------------------------------------------------------------------------
-# Composite Provider (Dual-strategy: speed for NAV, completeness for data)
+# FMP Async Provider
 # ---------------------------------------------------------------------------
 
-class CompositeProvider(FundDataProvider):
-    """
-    Proveedor compuesto con estrategia dual de adquisición de datos.
 
-    **NAV / Histórico** → prioriza velocidad (FMP → YFinance → MStar light)
-    **Info / Sectores / Países / Holdings** → prioriza completitud (MStar → FMP → Finect)
+class FMPAsyncProvider(AsyncFundDataProvider):
+    """FinancialModelingPrep async — free tier (250 req/día)."""
 
-    Para ``get_fund_info``: fusiona TODOS los proveedores (primer valor gana).
-    Para ``get_sector_weights`` / ``get_country_weights`` / ``get_holdings``:
-        fusiona resultados priorizando la fuente con más datos.
-    """
+    BASE_URL = "https://financialmodelingprep.com/stable"
 
-    def __init__(
-        self,
-        providers: Optional[List[FundDataProvider]] = None,
-        cache_path: Optional[str] = None,
-        force_refresh: bool = False,
-    ):
-        """Inicializa el proveedor compuesto.
+    def __init__(self, api_key: Optional[str] = None) -> None:
+        self.api_key = api_key or _get_fmp_api_key()
+        self._symbol_cache: Dict[str, Optional[str]] = {}
 
-        Args:
-            providers: lista explícita de proveedores (modo legacy).
-            cache_path: ruta base para la caché de disco de MStarProvider.
-            force_refresh: si ``True``, ignora la caché de disco de
-                MStarProvider y fuerza descarga fresca.  Usar cuando
-                el usuario pulsa "Recalcular Cotizaciones".
-        """
-        # Máxima antigüedad aceptable del NAV (días naturales).
-        # 3 días cubre fines de semana y festivos habituales.
-        self._nav_freshness_days = 3
+    @property
+    def available(self) -> bool:
+        return self.api_key is not None
 
-        if providers is not None:
-            # Modo legacy: se proporcionan los proveedores directamente
-            self.providers = providers
-            self._nav_chain = providers
-            self._history_chain = providers
-            self._data_chain = providers
-        else:
-            from .finect_provider import FinectProvider
-            from .ft_provider import FTProvider
-
-            fmp = FMPProvider()
-            # Si force_refresh=True, ignorar la cache .pkl de MStar para
-            # garantizar datos frescos (evita servir historicos obsoletos).
-            mstar = MStarProvider(cache_path=cache_path, use_cache=not force_refresh)
-            yf = YFinanceProvider()
-            finect = FinectProvider()
-            ft = FTProvider()
-
-            # Cadena NAV (precio actual): prioriza velocidad + frescura
-            # Finect (~500ms, NAV + fecha exacta) → YFinance (~300ms)
-            # → FMP (~300ms, si hay key) → MorningStar (backup lento)
-            self._nav_chain: List[FundDataProvider] = [finect, yf]
-            if fmp.available:
-                self._nav_chain.append(fmp)
-            self._nav_chain.append(mstar)
-
-            # Cadena historial: Finect BFF → YFinance → FMP → MStar.
-            # Se usa estrategia "longest wins": se consultan todos y se devuelve
-            # el resultado con más puntos, extendiendo el rango si varios tienen datos.
-            self._history_chain: List[FundDataProvider] = [finect, yf]
-            if fmp.available:
-                self._history_chain.append(fmp)
-            self._history_chain.append(mstar)
-
-            # Cadena datos: Finect (mejor fuente de métricas, sectores, regiones, fees)
-            # + FTProvider (sectores/holdings/regiones para UCITS europeos)
-            # + YFinance (fondos americanos, ETFs, sector_weightings) + FMP
-            self._data_chain: List[FundDataProvider] = [finect, ft, yf]
-            if fmp.available:
-                self._data_chain.append(fmp)
-
-            # Mantener .providers para compatibilidad (unión de todas las cadenas, sin duplicados)
-            seen = set()
-            self.providers: List[FundDataProvider] = []
-            for p in self._nav_chain + self._history_chain + self._data_chain + [mstar, finect]:
-                pid = id(p)
-                if pid not in seen:
-                    seen.add(pid)
-                    self.providers.append(p)
-
-    def _first_success(self, chain: List[FundDataProvider], method_name: str, isin: str, **kwargs):
-        """Ejecuta method_name en cada proveedor de la cadena hasta obtener resultado."""
-        for p in chain:
+    async def _get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+        if not self.api_key:
+            return None
+        params = params or {}
+        params["apikey"] = self.api_key
+        url = f"{self.BASE_URL}/{endpoint}"
+        resp = await fetch_with_retry(url, params=params)
+        if resp:
             try:
-                result = getattr(p, method_name)(isin, **kwargs)
-                if result is not None:
-                    if isinstance(result, pd.DataFrame):
-                        if not result.empty:
-                            return result
-                    elif isinstance(result, dict):
-                        if result:
-                            return result
-                    else:
-                        return result
-            except Exception as e:
-                logger.debug(
-                    "%s.%s(%s) failed: %s", type(p).__name__, method_name, isin, e
-                )
-                continue
+                return resp.json()
+            except Exception:
+                pass
         return None
 
-    # ------------------------------------------------------------------
-    # NAV (velocidad ⚡) — usa _nav_chain con early termination
-    # ------------------------------------------------------------------
+    async def _resolve_symbol(self, isin: str) -> Optional[str]:
+        if isin in self._symbol_cache:
+            return self._symbol_cache[isin]
 
-    @staticmethod
-    def _last_date(df: pd.DataFrame) -> Optional[str]:
-        """Devuelve la fecha del último registro de un historial [date, price]."""
-        if df is None or df.empty or "date" not in df.columns:
+        data = await self._get("search-isin", {"isin": isin})
+        symbol = None
+        if data and isinstance(data, list) and len(data) > 0:
+            symbol = data[0].get("symbol")
+
+        if not symbol:
+            data = await self._get("search", {"query": isin, "limit": "5"})
+            if data and isinstance(data, list):
+                for item in data:
+                    if item.get("isin") == isin or isin in (item.get("name") or ""):
+                        symbol = item.get("symbol")
+                        break
+                if not symbol and len(data) > 0:
+                    symbol = data[0].get("symbol")
+
+        self._symbol_cache[isin] = symbol
+        return symbol
+
+    async def get_nav(self, isin: str) -> Optional[float]:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
             return None
-        try:
-            last = pd.to_datetime(df["date"]).max()
-            return last.strftime("%Y-%m-%d") if not pd.isnull(last) else None
-        except Exception:
-            return None
+        data = await self._get("quote-short", {"symbol": symbol})
+        if data and isinstance(data, list) and len(data) > 0:
+            return data[0].get("price")
+        return None
+
+    async def get_nav_date(self, isin: str) -> Optional[str]:
+        # FMP no proporciona fecha de NAV de forma directa
+        return None
+
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
+            return pd.DataFrame(columns=["date", "price"])
+        start = (datetime.now() - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+        data = await self._get("historical-price-eod/light", {"symbol": symbol, "from": start})
+        if not data or not isinstance(data, list):
+            return pd.DataFrame(columns=["date", "price"])
+        df = pd.DataFrame(data)
+        if "date" in df.columns and "close" in df.columns:
+            df = df.rename(columns={"close": "price"})[["date", "price"]]
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+            return df
+        return pd.DataFrame(columns=["date", "price"])
+
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
+            return {}
+        info = await self._get("etf/info", {"symbol": symbol})
+        if info and isinstance(info, list) and len(info) > 0:
+            item = info[0]
+            return {
+                "name": item.get("name", ""),
+                "symbol": symbol,
+                "expense_ratio": item.get("expenseRatio"),
+                "aum": item.get("aum"),
+                "inception_date": item.get("inceptionDate"),
+                "currency": item.get("currency", "EUR"),
+                "source": "FMP",
+            }
+        profile = await self._get("profile", {"symbol": symbol})
+        if profile and isinstance(profile, list) and len(profile) > 0:
+            item = profile[0]
+            return {
+                "name": item.get("companyName", ""),
+                "symbol": symbol,
+                "sector": item.get("sector", ""),
+                "currency": item.get("currency", "EUR"),
+                "source": "FMP",
+            }
+        return {}
+
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
+            return {}
+        data = await self._get("etf/sector-weightings", {"symbol": symbol})
+        if data and isinstance(data, list):
+            return {item["sector"]: item["weightPercentage"] for item in data if "sector" in item}
+        return {}
+
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
+            return {}
+        data = await self._get("etf/country-weightings", {"symbol": symbol})
+        if data and isinstance(data, list):
+            return {item["country"]: item["weightPercentage"] for item in data if "country" in item}
+        return {}
+
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
+        symbol = await self._resolve_symbol(isin)
+        if not symbol:
+            return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+        data = await self._get("etf/holdings", {"symbol": symbol})
+        if data and isinstance(data, list):
+            rows = []
+            for h in data[:25]:
+                rows.append({
+                    "name": h.get("name", ""),
+                    "ticker": h.get("asset", ""),
+                    "weight": h.get("weightPercentage", 0),
+                    "market_value": h.get("marketValue", 0),
+                })
+            return pd.DataFrame(rows)
+        return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+
+# ---------------------------------------------------------------------------
+# Composite Async Provider (Dual-strategy orchestrator)
+# ---------------------------------------------------------------------------
+
+
+class CompositeAsyncProvider:
+    """Proveedor compuesto async con estrategia dual.
+
+    NAV/Histórico → prioriza velocidad (early termination)
+    Info/Sectores/Países/Holdings → prioriza completitud (gather + merge)
+    """
+
+    def __init__(self, cache: CacheStore, force_refresh: bool = False) -> None:
+        self._cache = cache
+        self._force_refresh = force_refresh
+        self._nav_freshness_days = 3
+
+        # Instanciar providers
+        self._finect = FinectAsyncProvider(cache)
+        self._ft = FTAsyncProvider()
+        self._yf = YFinanceAsyncProvider()
+        self._fmp = FMPAsyncProvider()
+
+        # Cadenas por propósito
+        self._nav_chain: List[AsyncFundDataProvider] = [self._finect, self._yf]
+        if self._fmp.available:
+            self._nav_chain.append(self._fmp)
+
+        self._history_chain: List[AsyncFundDataProvider] = [self._finect, self._yf]
+        if self._fmp.available:
+            self._history_chain.append(self._fmp)
+
+        self._data_chain: List[AsyncFundDataProvider] = [self._finect, self._ft, self._yf]
+        if self._fmp.available:
+            self._data_chain.append(self._fmp)
 
     def _is_fresh(self, date_str: Optional[str]) -> bool:
-        """Comprueba si una fecha de NAV es suficientemente reciente.
-
-        Devuelve ``True`` si la fecha está dentro de los últimos
-        ``_nav_freshness_days`` días naturales (cubre fines de semana
-        y festivos habituales).
-        """
+        """Comprueba si una fecha es ≤ _nav_freshness_days."""
         if not date_str:
             return False
         try:
@@ -758,66 +940,61 @@ class CompositeProvider(FundDataProvider):
         except (ValueError, TypeError):
             return False
 
-    def get_nav(self, isin: str) -> Optional[float]:
-        """NAV actual con early termination.
+    # ------------------------------------------------------------------
+    # NAV (velocidad — early termination)
+    # ------------------------------------------------------------------
 
-        Recorre la cadena NAV (Finect → YFinance → FMP → MStar) y
-        devuelve el primer precio cuya fecha sea reciente (≤ 3 días).
-        Si ningún proveedor devuelve fecha fresca, retorna el mejor
-        candidato (precio más reciente encontrado).
+    async def get_nav(self, isin: str) -> Optional[float]:
+        """NAV actual con early termination sobre la cadena."""
+        # Check cache primero
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.nav_key(isin))
+            if cached is not None:
+                cached_date = await self._cache.aget(CacheStore.nav_date_key(isin))
+                if self._is_fresh(cached_date):
+                    return cached
 
-        Usa ``get_nav()`` (ligero) en lugar de ``get_nav_history()``
-        (pesado) para máxima velocidad.
-        """
         best_price: Optional[float] = None
         best_date: Optional[str] = None
 
         for p in self._nav_chain:
             pname = type(p).__name__
             try:
-                price = p.get_nav(isin)
+                price = await p.get_nav(isin)
                 if price is None or price <= 0:
-                    logger.debug("%s.get_nav(%s) → sin resultado", pname, isin)
                     continue
 
-                nav_date = p.get_nav_date(isin)
-                logger.debug(
-                    "%s.get_nav(%s) → %.4f @ %s",
-                    pname, isin, price, nav_date or "sin fecha",
-                )
+                nav_date = await p.get_nav_date(isin)
 
-                # Guardar como candidato si es mejor que lo que tenemos
                 if best_date is None or (nav_date and nav_date > best_date):
                     best_price = price
                     best_date = nav_date
 
-                # Early termination: si la fecha es fresca, aceptar de inmediato
                 if self._is_fresh(nav_date):
-                    logger.debug(
-                        "NAV para %s aceptado de %s (fresco: %s)",
-                        isin, pname, nav_date,
-                    )
+                    logger.debug("NAV %s accepted from %s (fresh: %s)", isin, pname, nav_date)
                     break
-
             except Exception as e:
                 logger.debug("%s.get_nav(%s) failed: %s", pname, isin, e)
                 continue
 
-        # Propagar la mejor fecha al cache de YFinance para get_nav_date()
-        if best_date:
-            for p in self._nav_chain:
-                if isinstance(p, YFinanceProvider):
-                    p._last_nav_dates.setdefault(isin, best_date)
-                    break
+        # Guardar en cache
+        if best_price is not None:
+            await self._cache.aset(CacheStore.nav_key(isin), best_price, TTL_NAV)
+            if best_date:
+                await self._cache.aset(CacheStore.nav_date_key(isin), best_date, TTL_NAV)
 
         return best_price
 
-    def get_nav_date(self, isin: str) -> Optional[str]:
-        """Última fecha de dato NAV — recorre la cadena con early termination."""
+    async def get_nav_date(self, isin: str) -> Optional[str]:
+        """Fecha del último NAV — recorre cadena con early termination."""
+        cached = await self._cache.aget(CacheStore.nav_date_key(isin))
+        if cached and self._is_fresh(cached):
+            return cached
+
         best_date: Optional[str] = None
         for p in self._nav_chain:
             try:
-                d = p.get_nav_date(isin)
+                d = await p.get_nav_date(isin)
                 if d and (best_date is None or d > best_date):
                     best_date = d
                     if self._is_fresh(d):
@@ -826,130 +1003,211 @@ class CompositeProvider(FundDataProvider):
                 continue
         return best_date
 
-    def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        """Histórico de precios — estrategia "longest wins".
+    # ------------------------------------------------------------------
+    # NAV History (completitud — parallel "longest wins")
+    # ------------------------------------------------------------------
 
-        Consulta todos los proveedores de la cadena (Finect BFF, YFinance, FMP, MStar)
-        y devuelve la serie más larga (mayor número de puntos).  Si varias fuentes
-        tienen datos complementarios (rangos de fecha distintos) las combina para
-        obtener el histórico más completo posible.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
+        """Histórico: gather todos los providers, devuelve la serie más larga."""
+        # Check cache
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.nav_history_key(isin, years))
+            if cached is not None:
+                df = pd.DataFrame(cached)
+                if not df.empty:
+                    df["date"] = pd.to_datetime(df["date"])
+                    return df
 
-        results: list[pd.DataFrame] = []
-
-        def _fetch(p: FundDataProvider) -> pd.DataFrame:
+        async def _fetch(p: AsyncFundDataProvider) -> pd.DataFrame:
             try:
-                df = p.get_nav_history(isin, years=years)
+                df = await p.get_nav_history(isin, years=years)
                 if df is not None and not df.empty and "date" in df.columns:
                     df = df.copy()
                     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
                     return df.dropna(subset=["price"]).reset_index(drop=True)
             except Exception as exc:
-                logger.debug("%s.get_nav_history(%s) failed: %s", type(p).__name__, isin, exc)
+                logger.debug("%s history(%s) failed: %s", type(p).__name__, isin, exc)
             return pd.DataFrame(columns=["date", "price"])
 
-        # Fetch in parallel
-        with ThreadPoolExecutor(max_workers=min(len(self._history_chain), 4)) as pool:
-            futures = {pool.submit(_fetch, p): p for p in self._history_chain}
-            for fut in as_completed(futures):
-                df = fut.result()
-                if not df.empty:
-                    results.append(df)
+        results = await asyncio.gather(*[_fetch(p) for p in self._history_chain])
+        non_empty = [r for r in results if not r.empty]
 
-        if not results:
+        if not non_empty:
             return pd.DataFrame(columns=["date", "price"])
 
-        if len(results) == 1:
-            return results[0]
+        if len(non_empty) == 1:
+            result = non_empty[0]
+        else:
+            # Merge: concatenar y deduplicar por fecha (keep longest)
+            sorted_by_len = sorted(non_empty, key=len)
+            combined = pd.concat(sorted_by_len).drop_duplicates(subset="date", keep="last")
+            result = combined.sort_values("date").reset_index(drop=True)
 
-        # Merge all results: concatenate and take the entry with the most
-        # data per date (prefer the result with the most total points for
-        # dates that overlap — i.e. keep the longest range but fill gaps).
-        combined = pd.concat(results).sort_values("date")
-        # For overlapping dates keep last (longest result sorted last by len)
-        results_sorted = sorted(results, key=len)
-        combined = pd.concat(results_sorted).drop_duplicates(subset="date", keep="last").sort_values("date")
-        return combined.reset_index(drop=True)
+        # Guardar en cache
+        cache_data = result[["date", "price"]].copy()
+        cache_data["date"] = cache_data["date"].dt.strftime("%Y-%m-%d")
+        await self._cache.aset(
+            CacheStore.nav_history_key(isin, years),
+            cache_data.to_dict(orient="records"),
+            TTL_NAV_HISTORY,
+        )
+
+        return result
 
     # ------------------------------------------------------------------
-    # Info (completitud 📊) — fusiona TODOS los proveedores de _data_chain
+    # Info (completitud — gather + merge first-non-null)
     # ------------------------------------------------------------------
 
-    def get_fund_info(self, isin: str) -> Dict[str, Any]:
-        """Info fusionada de todos los proveedores de datos.
+    async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        """Info fusionada: gather todos los providers de datos, merge first-non-null."""
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.fund_info_key(isin))
+            if cached:
+                return cached
 
-        Itera la cadena de datos y fusiona los resultados: el primer valor
-        no vacío de cada campo gana.
-        """
-        merged: Dict[str, Any] = {}
-        for p in self._data_chain:
+        async def _fetch(p: AsyncFundDataProvider) -> Dict[str, Any]:
             try:
-                info = p.get_fund_info(isin)
-                if info:
-                    for k, v in info.items():
-                        if k not in merged or merged[k] is None or merged[k] == "":
-                            merged[k] = v
-                        # Si el "name" actual es el propio ISIN, seguir buscando
-                        if k == "name" and merged.get("name") == isin and v != isin:
-                            merged["name"] = v
+                return await p.get_fund_info(isin)
             except Exception:
+                return {}
+
+        results = await asyncio.gather(*[_fetch(p) for p in self._data_chain])
+
+        merged: Dict[str, Any] = {}
+        for info in results:
+            if not info:
                 continue
+            for k, v in info.items():
+                if k not in merged or merged[k] is None or merged[k] == "":
+                    merged[k] = v
+                if k == "name" and merged.get("name") == isin and v != isin:
+                    merged["name"] = v
+
+        if merged:
+            await self._cache.aset(CacheStore.fund_info_key(isin), merged, TTL_FUND_INFO)
+
         return merged
 
     # ------------------------------------------------------------------
-    # Sectores / Países / Holdings (completitud 📊) — fusiona _data_chain
+    # Sectores / Países / Holdings (completitud — best wins)
     # ------------------------------------------------------------------
 
-    def get_sector_weights(self, isin: str) -> Dict[str, float]:
-        """Distribución sectorial — devuelve la fuente más completa.
+    async def get_sector_weights(self, isin: str) -> Dict[str, float]:
+        """Sectores: gather providers, devuelve el más completo."""
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.sectors_key(isin))
+            if cached:
+                return cached
 
-        Consulta todos los proveedores de datos y devuelve el resultado
-        con más sectores (mayor granularidad).
-        """
-        best: Dict[str, float] = {}
-        for p in self._data_chain:
+        async def _fetch(p: AsyncFundDataProvider) -> Dict[str, float]:
             try:
-                result = p.get_sector_weights(isin)
-                if result and len(result) > len(best):
-                    best = result
+                return await p.get_sector_weights(isin)
             except Exception:
-                continue
+                return {}
+
+        results = await asyncio.gather(*[_fetch(p) for p in self._data_chain])
+        best = max(results, key=len) if results else {}
+
+        if best:
+            await self._cache.aset(CacheStore.sectors_key(isin), best, TTL_SECTORS)
         return best
 
-    def get_country_weights(self, isin: str) -> Dict[str, float]:
-        """Distribución geográfica — devuelve la fuente más completa."""
-        best: Dict[str, float] = {}
-        for p in self._data_chain:
+    async def get_country_weights(self, isin: str) -> Dict[str, float]:
+        """Regiones: gather providers, devuelve el más completo."""
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.regions_key(isin))
+            if cached:
+                return cached
+
+        async def _fetch(p: AsyncFundDataProvider) -> Dict[str, float]:
             try:
-                result = p.get_country_weights(isin)
-                if result and len(result) > len(best):
-                    best = result
+                return await p.get_country_weights(isin)
             except Exception:
-                continue
+                return {}
+
+        results = await asyncio.gather(*[_fetch(p) for p in self._data_chain])
+        best = max(results, key=len) if results else {}
+
+        if best:
+            await self._cache.aset(CacheStore.regions_key(isin), best, TTL_REGIONS)
         return best
 
-    def get_holdings(self, isin: str) -> pd.DataFrame:
-        """Top holdings — devuelve la fuente con más posiciones."""
-        best = pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
-        for p in self._data_chain:
+    async def get_holdings(self, isin: str) -> pd.DataFrame:
+        """Holdings: gather providers, devuelve el más completo."""
+        if not self._force_refresh:
+            cached = await self._cache.aget(CacheStore.holdings_key(isin))
+            if cached:
+                return pd.DataFrame(cached)
+
+        async def _fetch(p: AsyncFundDataProvider) -> pd.DataFrame:
             try:
-                result = p.get_holdings(isin)
-                if result is not None and not result.empty and len(result) > len(best):
-                    best = result
+                return await p.get_holdings(isin)
             except Exception:
-                continue
+                return pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+        results = await asyncio.gather(*[_fetch(p) for p in self._data_chain])
+        best = max(results, key=len) if results else pd.DataFrame(columns=["name", "ticker", "weight", "market_value"])
+
+        if not best.empty:
+            await self._cache.aset(
+                CacheStore.holdings_key(isin),
+                best.to_dict(orient="records"),
+                TTL_HOLDINGS,
+            )
         return best
 
-    def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+    async def get_asset_allocation(self, isin: str) -> Dict[str, float]:
+        """Asset allocation del fondo (si disponible)."""
         best: Dict[str, float] = {}
         for p in self._data_chain:
             try:
                 func = getattr(p, "get_asset_allocation", None)
                 if func:
-                    result = func(isin)
+                    result = await func(isin)
                     if result and len(result) > len(best):
                         best = result
             except Exception:
                 continue
         return best
+
+    # ------------------------------------------------------------------
+    # Batch helpers (para el Client)
+    # ------------------------------------------------------------------
+
+    async def get_nav_batch(self, isins: List[str]) -> Dict[str, float]:
+        """Obtiene NAVs de todos los ISINs en paralelo."""
+        async def _get_one(isin: str) -> tuple:
+            try:
+                price = await self.get_nav(isin)
+                return isin, price if price and price > 0 else 0.0
+            except Exception as exc:
+                logger.warning("get_nav_batch: failed for %s: %s", isin, exc)
+                return isin, 0.0
+
+        results = await asyncio.gather(*[_get_one(isin) for isin in isins])
+        return dict(results)
+
+    async def get_nav_dates_batch(self, isins: List[str]) -> Dict[str, Optional[str]]:
+        """Obtiene fechas de NAV de todos los ISINs en paralelo."""
+        async def _get_one(isin: str) -> tuple:
+            date = await self.get_nav_date(isin)
+            return isin, date
+
+        results = await asyncio.gather(*[_get_one(isin) for isin in isins])
+        return dict(results)
+
+    async def resolve_names_batch(self, isins: List[str]) -> Dict[str, str]:
+        """Resuelve nombres para una lista de ISINs en paralelo."""
+        async def _resolve(isin: str) -> tuple:
+            # Primero cache
+            cached = await self._cache.aget(CacheStore.name_key(isin))
+            if cached:
+                return isin, cached
+            info = await self.get_fund_info(isin)
+            name = info.get("name", isin) if info else isin
+            if name and name != isin:
+                await self._cache.aset(CacheStore.name_key(isin), name, TTL_NAMES)
+            return isin, name
+
+        results = await asyncio.gather(*[_resolve(isin) for isin in isins])
+        return dict(results)

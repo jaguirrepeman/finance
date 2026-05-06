@@ -1,9 +1,12 @@
 """
 endpoints.py — API REST del Portfolio Tracker.
 
-Usa portfolio_service.py (clases modernas) en vez del código deprecated.
+Usa portfolio_service.py para acceder a los datos de cartera.
 Mantiene compatibilidad con las shapes de respuesta del frontend existente.
-Añade nuevos endpoints: /positions, /open-lots, /tax-optimize, /fund/{isin}/details.
+
+Endpoints disponibles: summary, details, history_batch, correlation,
+positions, open-lots, tax-optimize, fund details, fund search,
+simulate, evolution-metrics, performance, traspaso-analysis, upload-orders.
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
@@ -26,7 +29,7 @@ from ..schemas.portfolio import (
     SimulationResponse,
     TraspasoFundItem,
 )
-from ..services.portfolio_service_v2 import (
+from ..services.portfolio_service import (
     CACHE_DIR,
     EXCEL_PATH,
     TSV_PATH,

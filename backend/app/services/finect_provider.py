@@ -28,7 +28,33 @@ from urllib.parse import unquote
 import pandas as pd
 import requests
 
-from .data_providers import FundDataProvider
+from abc import ABC, abstractmethod
+
+
+class FundDataProvider(ABC):
+    """Interfaz base para proveedores de datos de fondos (sync)."""
+
+    @abstractmethod
+    def get_nav(self, isin: str) -> float | None: ...
+
+    @abstractmethod
+    def get_fund_info(self, isin: str) -> Dict[str, Any] | None: ...
+
+    @abstractmethod
+    def get_sector_weights(self, isin: str) -> Dict[str, float] | None: ...
+
+    @abstractmethod
+    def get_country_weights(self, isin: str) -> Dict[str, float] | None: ...
+
+    @abstractmethod
+    def get_holdings(self, isin: str) -> pd.DataFrame: ...
+
+    def get_nav_date(self, isin: str) -> str | None:
+        return None
+
+    def get_nav_history(self, isin: str, years: int = 3) -> pd.DataFrame:
+        return pd.DataFrame()
+
 
 logger = logging.getLogger(__name__)
 

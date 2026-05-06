@@ -1,22 +1,26 @@
 """
 main.py — Entrypoint FastAPI del Portfolio Tracker.
 
+Usa el patrón lifespan moderno y el PortfolioClient async.
+
 Ejecutar con:
     cd backend
     poetry run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 """
 
 import logging
-import os
 import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from .api import endpoints
-from .services.portfolio_service_v2 import load_json, run_analytics_pipeline
+from .services.http_client import close_http_client
+from .services.portfolio_service import load_json, run_analytics_pipeline
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -26,6 +30,37 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lifespan (reemplaza @app.on_event("startup") deprecado)
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestiona el ciclo de vida de la app: startup → yield → shutdown."""
+    # --- Startup ---
+    cached_summary = load_json("summary.json")
+    if cached_summary:
+        logger.info("Cache found — serving instantly. Background refresh started.")
+    else:
+        logger.info("No cache — building data in background thread.")
+
+    # Lanzar pipeline en background thread (no bloquea el arranque)
+    t = threading.Thread(
+        target=run_analytics_pipeline,
+        kwargs={"force_download": False},
+        daemon=True,
+    )
+    t.start()
+
+    yield  # La app está corriendo
+
+    # --- Shutdown ---
+    await close_http_client()
+    logger.info("Application shutdown complete.")
+
 
 # ---------------------------------------------------------------------------
 # App
@@ -33,8 +68,9 @@ logging.basicConfig(
 
 app = FastAPI(
     title="Portfolio Tracker API",
-    description="Backend para el dashboard de Portfolio Financiero",
-    version="0.2.0",
+    description="Backend para el dashboard de Portfolio Financiero (v2 async)",
+    version="0.3.0",
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -44,10 +80,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",      # Vite dev
-        "http://localhost:3000",      # CRA / alt dev
+        "http://localhost:5173",
+        "http://localhost:3000",
         "http://127.0.0.1:5173",
-        "http://127.0.0.1:8000",     # Self-serve (frontend estático)
+        "http://127.0.0.1:8000",
         "http://localhost:8000",
     ],
     allow_credentials=True,
@@ -61,52 +97,33 @@ app.add_middleware(
 
 app.include_router(endpoints.router, prefix="/api/portfolio", tags=["portfolio"])
 
-
-# ---------------------------------------------------------------------------
-# Startup: background refresh de datos (sin bloquear arranque)
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def startup_background_refresh():
-    """Al arrancar, si ya hay caché JSON sirve al instante. Lanza recálculo en hilo aparte."""
-    cached_summary = load_json("summary.json")
-    if cached_summary:
-        logging.getLogger(__name__).info("Cache found — serving instantly. Background refresh started.")
-    else:
-        logging.getLogger(__name__).info("No cache — building data in background thread.")
-    # Siempre lanzar refresh en background para actualizar datos
-    t = threading.Thread(target=run_analytics_pipeline, kwargs={"force_download": False}, daemon=True)
-    t.start()
-
-
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/health", tags=["system"])
 def health_check():
-    """Endpoint de salud para verificar que el backend está vivo."""
+    """Endpoint de salud."""
     return {"status": "ok", "version": app.version}
 
 
 # ---------------------------------------------------------------------------
-# Servir frontend estático (index.html + assets)
+# Frontend estático
 # ---------------------------------------------------------------------------
 
-FRONTEND_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"
-)
+FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 
-if os.path.isdir(FRONTEND_DIR):
+if FRONTEND_DIR.is_dir():
+
     @app.get("/", include_in_schema=False)
     def serve_index():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+        return FileResponse(str(FRONTEND_DIR / "index.html"))
 
     @app.get("/components.js", include_in_schema=False)
     def serve_components_js():
-        """Serve components.js with no-cache so browser always gets the latest build."""
-        path = os.path.join(FRONTEND_DIR, "components.js")
-        with open(path, "rb") as f:
+        """Serve components.js sin cache para que el navegador siempre cargue la versión más reciente."""
+        with open(str(FRONTEND_DIR / "components.js"), "rb") as f:
             content = f.read()
         return Response(
             content=content,
@@ -116,9 +133,8 @@ if os.path.isdir(FRONTEND_DIR):
 
     @app.get("/style.css", include_in_schema=False)
     def serve_style_css():
-        """Serve style.css with no-cache so CSS changes are always applied."""
-        path = os.path.join(FRONTEND_DIR, "style.css")
-        with open(path, "rb") as f:
+        """Serve style.css sin cache."""
+        with open(str(FRONTEND_DIR / "style.css"), "rb") as f:
             content = f.read()
         return Response(
             content=content,
@@ -126,4 +142,4 @@ if os.path.isdir(FRONTEND_DIR):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")

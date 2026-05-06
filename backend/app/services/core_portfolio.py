@@ -2,14 +2,14 @@
 core_portfolio.py — Clase central Portfolio.
 
 Fuente de verdad para la cartera de inversión. Soporta:
-  - Carga desde Excel (libro de órdenes)
+  - Carga desde TSV/Excel/CSV (libro de órdenes del broker)
   - Carga desde lista de dicts o dict {ISIN: participaciones}
-  - Contabilidad FIFO automática (lotes abiertos)
+  - Contabilidad FIFO automática (lotes abiertos, reembolsos parciales)
   - Generación de resumen en DataFrame (una fila por fondo)
 
-Dependencias activas:
-  - functions_fund.py  → clase Fund (precios live, datos Morningstar)
-  - tax_calculator.py  → TaxOptimizer (usa open_lots de esta clase)
+Consumido por:
+  - client_async.py → AsyncPortfolioCore (posiciones + precios live)
+  - tax_calculator.py → TaxOptimizer (usa open_lots de esta clase)
 """
 
 import logging
@@ -318,55 +318,6 @@ class Portfolio:
     def get_open_lots(self) -> List[Dict]:
         """Devuelve la lista de lotes FIFO abiertos."""
         return self.open_lots
-
-    def get_positions(self) -> pd.DataFrame:
-        """
-        Devuelve un DataFrame con las posiciones activas:
-        ISIN, Fondo, Participaciones, Valor_Euros, Fecha_Valoracion
-        """
-        from app.services.functions_fund import Fund
-        
-        rows = []
-        for isin, units in self.positions.items():
-            try:
-                # Usamos modo light para no tardar demasiado
-                fund = Fund(isin=isin, mode="light", use_cache=True)
-                df_fund = fund.fund_data
-                
-                nombre = isin
-                precio = 0.0
-                fecha = None
-                
-                if df_fund is not None and not df_fund.empty:
-                    nombre = df_fund['nombre'].iloc[0]
-                    data_col = df_fund['data'].iloc[0]
-                    if isinstance(data_col, pd.DataFrame):
-                        precio = float(data_col.get('precio_actual', [0.0])[0])
-                        fecha = data_col.get('fecha_actualizacion', [None])[0]
-                
-                valor_eur = units * precio
-                
-                rows.append({
-                    "ISIN": isin,
-                    "Fondo": nombre,
-                    "Participaciones": units,
-                    "Valor_Euros": round(valor_eur, 2),
-                    "Fecha_Valoracion": fecha
-                })
-            except Exception as e:
-                logger.error("Error obteniendo datos para %s: %s", isin, e)
-                rows.append({
-                    "ISIN": isin,
-                    "Fondo": isin,
-                    "Participaciones": units,
-                    "Valor_Euros": 0.0,
-                    "Fecha_Valoracion": None
-                })
-                
-        if not rows:
-            return pd.DataFrame(columns=["ISIN", "Fondo", "Participaciones", "Valor_Euros", "Fecha_Valoracion"])
-            
-        return pd.DataFrame(rows).sort_values("Valor_Euros", ascending=False).reset_index(drop=True)
 
     def get_total_invested(self) -> float:
         """Calcula el capital total invertido (suma de importes de lotes abiertos)."""
