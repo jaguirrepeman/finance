@@ -1,55 +1,104 @@
 """
 tax_calculator.py — Optimizador fiscal para retiradas de fondos.
 
-Implementa el algoritmo de retirada óptima:
-  1. Ordena lotes abiertos por ganancia patrimonial (menor primero).
-  2. Vende del lote con menor plusvalía para minimizar impuestos.
-  3. Calcula impuestos según tramos del ahorro España 2024:
-     - 19% hasta 6.000€
-     - 21% de 6.000 a 50.000€
-     - 23% de 50.000 a 200.000€
-     - 27% de 200.000 a 300.000€
-     - 28% más de 300.000€
+Implementa dos algoritmos:
+
+1. ``optimize_withdrawal`` — plan FIFO simple (vende primero el lote con
+   menor plusvalía relativa de todo el portfolio).
+
+2. ``optimize_withdrawal_via_traspaso`` — optimizador global FIFO +
+   traspasos previos (Art. 94 Ley 35/2006 IRPF):
+
+   Best-practice para minimizar impuestos al retirar efectivo:
+   - Los traspasos entre IICs no tributan → pivote legal.
+   - Algoritmo greedy global (óptimo para funciones de impuesto convexas):
+       a. Puntuar TODOS los lotes de TODOS los fondos por ganancia%
+          ascendente (más barata primero).
+       b. Seleccionar de forma codiciosa qué lotes reembolsar.
+       c. Por cada lote seleccionado, los lotes ANTERIORES en el mismo
+          fondo (que FIFO obligaría a vender antes) quedan asignados a
+          traspaso → coste fiscal = 0.
+   - Destinatario del traspaso: se prioriza un fondo indexado global ya
+     existente en cartera (sin abrir cuentas nuevas). Si no hay ninguno,
+     se recomiendan fondos de inversión indexados de bajo coste registrados
+     en CNMV/ESMA adecuados para inversores españoles.
+
+Tramos IRPF base del ahorro (Art. 66 Ley 35/2006, actualizados 2024):
+  19 % hasta 6.000 €
+  21 % de 6.000 a 50.000 €
+  23 % de 50.000 a 200.000 €
+  27 % de 200.000 a 300.000 €
+  28 % más de 300.000 €
 """
 
 import logging
-from typing import Any, Dict, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from .core_portfolio import Portfolio
+from .fund_classifier import is_index_fund
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Fondos indexados de referencia (IICs registrados, no ETFs) para España
+# Usados cuando no hay ningún fondo indexado ya en cartera.
+# ---------------------------------------------------------------------------
+_FALLBACK_INDEX_FUNDS: List[Dict[str, str]] = [
+    {
+        "isin": "IE000ZYRH0Q7",
+        "nombre": "iShares Developed World Index Fund (IE) S Acc EUR",
+        "motivo": "Fondo de gestión pasiva (no ETF) de bajo coste. Replica el MSCI World. Registrado en CNMV, disponible en MyInvestor, Indexa y otras plataformas españolas. Acumulación.",
+    },
+    {
+        "isin": "IE00B03HCZ61",
+        "nombre": "Vanguard Global Stock Index Fund EUR Acc",
+        "motivo": "Fondo índice (no ETF) de referencia mundial en gestión pasiva. Registrado en CNMV, ampliamente disponible en España. Acumulación.",
+    },
+    {
+        "isin": "LU0996182563",
+        "nombre": "Vanguard Global Stock Index EUR Hedged Acc",
+        "motivo": "Versión con cobertura de divisa EUR del Vanguard Global Stock Index Fund.",
+    },
+]
+
 
 class TaxOptimizer:
-    def __init__(self, portfolio: Portfolio, prices: Optional[Dict[str, float]] = None):
+    def __init__(
+        self,
+        portfolio: Portfolio,
+        prices: Optional[Dict[str, float]] = None,
+        fund_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+    ):
         """
         Args:
             portfolio: Portfolio con posiciones y lotes abiertos.
             prices: dict {ISIN: precio_actual} pre-obtenidos.
-                    Si no se pasan, se obtienen via Fund (lento).
+            fund_meta: dict {ISIN: {"name": str, "is_index": bool}}
+                       para selección inteligente del fondo destino.
         """
         self.portfolio = portfolio
         self.current_prices: Dict[str, float] = dict(prices) if prices else {}
-        
-    def _fetch_current_prices(self):
-        """Obtiene precios actuales para ISINs que no los tienen.
+        self.fund_meta: Dict[str, Dict[str, Any]] = fund_meta or {}
 
-        Usa CompositeAsyncProvider (via sync wrapper) para obtener NAVs.
-        """
+    # ------------------------------------------------------------------
+    # Utilidades privadas
+    # ------------------------------------------------------------------
+
+    def _fetch_current_prices(self) -> None:
+        """Obtiene precios actuales para ISINs que no los tienen."""
         missing = [
             isin for isin in self.portfolio.positions
             if isin not in self.current_prices or self.current_prices[isin] == 0
         ]
         if not missing:
             return
-
         try:
             import asyncio
             import nest_asyncio
             nest_asyncio.apply()
-
             from .data_providers import CompositeAsyncProvider
             from .cache_store import CacheStore
 
@@ -72,137 +121,618 @@ class TaxOptimizer:
             logger.warning("_fetch_current_prices failed: %s", e)
             for isin in missing:
                 self.current_prices.setdefault(isin, 0.0)
-            
+
     def calculate_taxes(self, capital_gain: float) -> float:
         """
-        Calcula los impuestos sobre la ganancia patrimonial según tramos del ahorro España 2024.
+        Calcula los impuestos sobre la ganancia patrimonial
+        según tramos del ahorro España 2024.
         """
         if capital_gain <= 0:
             return 0.0
-            
         tax = 0.0
         remaining = capital_gain
-        
-        # Tramos: 19% hasta 6k, 21% hasta 50k, 23% hasta 200k, 27% hasta 300k, 28% más de 300k
         tramos = [
-            (6000, 0.19),
-            (44000, 0.21),
-            (150000, 0.23),
-            (100000, 0.27),
-            (float('inf'), 0.28)
+            (6_000,     0.19),
+            (44_000,    0.21),
+            (150_000,   0.23),
+            (100_000,   0.27),
+            (float("inf"), 0.28),
         ]
-        
         for limite, tipo in tramos:
             if remaining <= 0:
                 break
             aplicable = min(remaining, limite)
             tax += aplicable * tipo
             remaining -= aplicable
-            
-        return tax
+        return round(tax, 2)
+
+    def _gain_pct(self, lot: Dict, current_price: float) -> float:
+        """Plusvalía relativa de un lote respecto al precio actual."""
+        cost = lot.get("Precio_Compra_Unitario", 0.0)
+        if cost <= 0:
+            return float("inf")
+        return (current_price - cost) / cost
+
+    def _choose_destination_fund(
+        self,
+        reembolso_isins: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Elige el fondo destino para los traspasos.
+
+        Solo se excluyen los fondos que van a ser REEMBOLSADOS en efectivo
+        (paso 2). Un fondo que solo aparece en el plan de traspasos (paso 1,
+        moviendo sus lotes antiguos a destino) puede seguir siendo receptor
+        de otros traspasos, ya que los nuevos lotes llegan con base propia.
+
+        Prioridad:
+          1) Fondos indexados ya en cartera (evitar abrir nuevas cuentas).
+          2) Si hay varios, el de mayor valor actual.
+          3) Si no hay ninguno indexado en cartera, recomendar
+             LU1681041458 (Amundi Index MSCI World) u otro de la lista.
+
+        Args:
+            reembolso_isins: ISINs de los fondos que se van a REEMBOLSAR en
+                efectivo (no pueden ser destino del traspaso).
+
+        Returns:
+            Dict con keys: isin, nombre, tipo ("portfolio_index" | "new_suggestion"),
+            motivo, is_index.
+        """
+        source_set = set(reembolso_isins)
+
+        # ── Buscar fondos indexados existentes en cartera ──
+        portfolio_index_candidates: List[Dict[str, Any]] = []
+        for isin, meta in self.fund_meta.items():
+            if isin in source_set:
+                continue
+            if meta.get("is_index"):
+                value = sum(
+                    l["Participaciones_Restantes"] * self.current_prices.get(isin, 0)
+                    for l in self.portfolio.open_lots
+                    if l["ISIN"] == isin
+                )
+                portfolio_index_candidates.append({
+                    "isin": isin,
+                    "nombre": meta.get("name", isin),
+                    "tipo": "portfolio_index",
+                    "is_index": True,
+                    "valor_actual": value,
+                    "motivo": (
+                        "Fondo indexado ya en cartera → ningún trámite de apertura "
+                        "de cuenta adicional. El traspaso mantiene la plusvalía "
+                        "diferida dentro del mismo índice."
+                    ),
+                })
+
+        if portfolio_index_candidates:
+            portfolio_index_candidates.sort(key=lambda x: -x["valor_actual"])
+            best = portfolio_index_candidates[0]
+            best.pop("valor_actual", None)
+            return best
+
+        # ── Sin indexado en cartera → sugerir Amundi o Vanguard ──
+        suggestion = _FALLBACK_INDEX_FUNDS[0]
+        return {
+            "isin": suggestion["isin"],
+            "nombre": suggestion["nombre"],
+            "tipo": "new_suggestion",
+            "is_index": True,
+            "motivo": suggestion["motivo"],
+        }
+
+    # ------------------------------------------------------------------
+    # Algoritmo principal: greedy global con traspasos
+    # ------------------------------------------------------------------
+
+    def optimize_withdrawal_via_traspaso(
+        self,
+        target_amount: float,
+    ) -> Dict[str, Any]:
+        """
+        Planifica la retirada de ``target_amount`` euros en efectivo
+        minimizando el IRPF mediante traspasos previos (Art. 94 LIRPF).
+
+        Algoritmo (greedy global, óptimo para impuesto convexo):
+          1. Calcule la plusvalía% de cada lote abierto en toda la cartera.
+          2. Ordene todos los lotes por plusvalía% ascendente (el más barato
+             primero).
+          3. Iteración codiciosa:
+               - Tome el lote de menor plusvalía disponible para reembolso.
+               - Los lotes ANTERIORES en el mismo fondo (que FIFO exigiría
+                 liquidar primero) se marcan para TRASPASO (coste = 0€).
+               - Acumule importe reembolsado hasta alcanzar target_amount.
+          4. Compare con el escenario FIFO directo (sin traspasos).
+          5. Seleccione el fondo destino de los traspasos.
+
+        Returns:
+            Dict con planos detallados de traspaso y reembolso, comparativa
+            fiscal y metadata del fondo destino.
+        """
+        self._fetch_current_prices()
+
+        all_lots: List[Dict] = [lot.copy() for lot in self.portfolio.get_open_lots()]
+        if not all_lots:
+            return self._empty_result(target_amount, "No hay lotes abiertos en cartera.")
+
+        # ── Agrupar lotes por ISIN, en orden cronológico (FIFO) ──
+        lots_by_isin: Dict[str, List[Dict]] = defaultdict(list)
+        for lot in all_lots:
+            lots_by_isin[lot["ISIN"]].append(lot)
+        for isin in lots_by_isin:
+            lots_by_isin[isin].sort(key=lambda x: x["Fecha"])
+
+        # ── Valor total disponible ──
+        total_portfolio_value = sum(
+            l["Participaciones_Restantes"] * self.current_prices.get(l["ISIN"], 0.0)
+            for l in all_lots
+            if self.current_prices.get(l["ISIN"], 0.0) > 0
+        )
+        if total_portfolio_value < target_amount:
+            return self._empty_result(
+                target_amount,
+                f"El valor total con precio conocido "
+                f"({total_portfolio_value:.2f}€) es inferior al objetivo "
+                f"({target_amount:.2f}€).",
+            )
+
+        # ── Escenario DIRECTO (FIFO puro, sin traspasos) ──
+        direct_result = self._direct_fifo_plan(lots_by_isin, target_amount)
+
+        # ── Escenario OPTIMIZADO (greedy global + traspasos) ──
+        optimized_result = self._greedy_traspaso_plan(lots_by_isin, target_amount)
+
+        # ── Selección del fondo destino ──
+        # Solo se excluyen los fondos que se van a REEMBOLSAR (no los que solo
+        # aparecen en el plan de traspasos — pueden seguir siendo receptor).
+        reembolso_isins = list({s["ISIN"] for s in optimized_result["reembolsos"]})
+        destination = self._choose_destination_fund(reembolso_isins)
+
+        # ── Enriquecer plan de traspasos con destino ──
+        for step in optimized_result["traspasos"]:
+            step["Destination_ISIN"] = destination["isin"]
+            step["Destination_Fondo"] = destination["nombre"]
+
+        # ── Calcular impuestos ──
+        direct_tax = self.calculate_taxes(direct_result["total_gain"])
+        opt_tax = self.calculate_taxes(optimized_result["total_gain"])
+        ahorro = direct_tax - opt_tax
+        ahorro_pct = (ahorro / direct_tax * 100) if direct_tax > 0 else 0.0
+
+        plusvalia_diferida = sum(
+            s.get("Plusvalia_Diferida", 0.0) for s in optimized_result["traspasos"]
+        )
+
+        return {
+            "target_amount": target_amount,
+            "total_portfolio_value": round(total_portfolio_value, 2),
+
+            # ── Comparativa de escenarios ──
+            "escenario_directo": {
+                "ganancia_patrimonial": round(direct_result["total_gain"], 2),
+                "impuesto": round(direct_tax, 2),
+                "neto_recibido": round(target_amount - direct_tax, 2),
+                "detalle": direct_result["steps"],
+            },
+            "escenario_optimizado": {
+                "ganancia_patrimonial": round(optimized_result["total_gain"], 2),
+                "impuesto": round(opt_tax, 2),
+                "neto_recibido": round(target_amount - opt_tax, 2),
+                "detalle": optimized_result["reembolsos"],
+            },
+
+            # ── Ahorros ──
+            "ahorro_fiscal": round(ahorro, 2),
+            "ahorro_fiscal_pct": round(ahorro_pct, 2),
+
+            # ── Planes de acción ──
+            "plan_traspasos": optimized_result["traspasos"],
+            "plan_reembolso": optimized_result["reembolsos"],
+
+            # ── Totales ──
+            "importe_traspasado": round(
+                sum(s["Importe_Traspasado"] for s in optimized_result["traspasos"]), 2
+            ),
+            "plusvalia_diferida": round(plusvalia_diferida, 2),
+            "fondos_afectados": list({s["ISIN"] for s in optimized_result["reembolsos"]}),
+
+            # ── Destino ──
+            "destination_fund": destination,
+            "destination_alternatives": [
+                f for f in _FALLBACK_INDEX_FUNDS if f["isin"] != destination.get("isin")
+            ],
+
+            # ── Cartera post-operaciones ──
+            "portfolio_after": self._portfolio_after(
+                lots_by_isin,
+                optimized_result["traspasos"],
+                optimized_result["reembolsos"],
+                destination,
+            ),
+
+            "notas": (
+                "Estrategia en 2 pasos (Art. 94 Ley 35/2006 IRPF): "
+                "① Traspasar los lotes indicados al fondo destino (operación EXENTA). "
+                "② Una vez confirmado el traspaso (~3-5 días hábiles), solicitar el "
+                "reembolso en efectivo del importe deseado. FIFO opera ahora sobre "
+                "los lotes más recientes → menor plusvalía → menor IRPF. "
+                "La plusvalía diferida queda en el fondo destino hasta un futuro reembolso."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # FIFO directo (sin traspasos) — línea base de comparación
+    # ------------------------------------------------------------------
+
+    def _direct_fifo_plan(
+        self,
+        lots_by_isin: Dict[str, List[Dict]],
+        target_amount: float,
+    ) -> Dict[str, Any]:
+        """
+        Calcula el coste fiscal de un reembolso FIFO puro (sin traspasos).
+
+        La estrategia actual del `optimize_withdrawal` ya intenta minimizar
+        el impuesto eligiendo el fondo con menor plusvalía relativa primero.
+        Aquí calculamos el peor caso real: FIFO estricto fund-by-fund en el
+        orden que elegiría el algoritmo greedy sin traspasos.
+        """
+        # Clonar lotes para no mutar el estado
+        lots: List[Dict] = []
+        for isin, isin_lots in lots_by_isin.items():
+            price = self.current_prices.get(isin, 0.0)
+            if price <= 0:
+                continue
+            for lot in isin_lots:
+                gain_pct = self._gain_pct(lot, price)
+                lots.append({**lot, "_price": price, "_gain_pct": gain_pct})
+
+        # Dentro de cada fondo, FIFO obliga a liquidar los más antiguos primero.
+        # El "greedy FIFO sin traspaso" = elegir el fondo cuyo lote más antiguo
+        # tiene la menor plusvalía (misma lógica que optimize_withdrawal).
+        steps: List[Dict] = []
+        total_gain = 0.0
+        remaining = target_amount
+
+        # Estado per-fund: índice del siguiente lote a consumir
+        queue: Dict[str, int] = {isin: 0 for isin in lots_by_isin}
+
+        while remaining > 0.01:
+            best_isin = None
+            best_gain_pct_val = float("inf")
+
+            for isin, isin_lots in lots_by_isin.items():
+                idx = queue[isin]
+                if idx >= len(isin_lots):
+                    continue
+                price = self.current_prices.get(isin, 0.0)
+                if price <= 0:
+                    continue
+                lot = isin_lots[idx]
+                gp = self._gain_pct(lot, price)
+                if gp < best_gain_pct_val:
+                    best_gain_pct_val = gp
+                    best_isin = isin
+
+            if best_isin is None:
+                break
+
+            price = self.current_prices[best_isin]
+            lot = lots_by_isin[best_isin][queue[best_isin]]
+            lot_value = lot["Participaciones_Restantes"] * price
+
+            if lot_value <= remaining:
+                units = lot["Participaciones_Restantes"]
+                amount = lot_value
+                queue[best_isin] += 1
+            else:
+                units = remaining / price
+                amount = remaining
+
+            gain = (price - lot["Precio_Compra_Unitario"]) * units
+            total_gain += gain
+            remaining -= amount
+
+            steps.append({
+                "ISIN": best_isin,
+                "Fondo": lot.get("Fondo", best_isin),
+                "Fecha_Compra": lot["Fecha"],
+                "Participaciones": round(units, 6),
+                "Importe": round(amount, 2),
+                "Ganancia_Patrimonial": round(gain, 2),
+                "Precio_Compra_Unitario": lot["Precio_Compra_Unitario"],
+            })
+
+        return {"total_gain": total_gain, "steps": steps}
+
+    # ------------------------------------------------------------------
+    # Greedy global con traspasos
+    # ------------------------------------------------------------------
+
+    def _greedy_traspaso_plan(
+        self,
+        lots_by_isin: Dict[str, List[Dict]],
+        target_amount: float,
+    ) -> Dict[str, Any]:
+        """
+        Greedy global: ordena TODOS los lotes por plusvalía% ascendente.
+
+        Por cada lote elegido para reembolso:
+          - Los lotes más antiguos del mismo fondo van a TRASPASO (coste 0€).
+          - El lote actual se reembolsa en efectivo.
+
+        Esta solución es óptima para funciones de impuesto convexas
+        (marginalmente crecientes) porque:
+          - Siempre procesamos el lote de menor coste fiscal primero.
+          - Los FIFO-obligatorios que se interponen se traspasen (gratis).
+          - Para minimizar impuesto convexo, es mejor distribuir la plusvalía
+            en los lotes de menor % → el greedy es la solución exacta.
+        """
+        # Construir lista plana de (lote, precio, gain_pct, fund_idx)
+        # con referencia a su posición FIFO dentro del fondo
+        flat: List[Dict] = []
+        for isin, isin_lots in lots_by_isin.items():
+            price = self.current_prices.get(isin, 0.0)
+            if price <= 0:
+                continue
+            for fifo_idx, lot in enumerate(isin_lots):
+                gp = self._gain_pct(lot, price)
+                flat.append({
+                    "lot": lot,
+                    "isin": isin,
+                    "price": price,
+                    "gain_pct": gp,
+                    "fifo_idx": fifo_idx,
+                    "value": lot["Participaciones_Restantes"] * price,
+                })
+
+        # Orden ascendente por plus% → los más baratos primero
+        flat.sort(key=lambda x: x["gain_pct"])
+
+        # Estado: lotes ya marcados como traspaso o reembolso (set de lot ids)
+        handled: Dict[str, set] = defaultdict(set)  # isin → {fifo_idx}
+
+        reembolsos: List[Dict] = []
+        traspasos: List[Dict] = []
+        total_gain = 0.0
+        remaining = target_amount
+
+        for item in flat:
+            if remaining <= 0.01:
+                break
+
+            isin = item["isin"]
+            price = item["price"]
+            lot = item["lot"]
+            fifo_idx = item["fifo_idx"]
+
+            # ── Traspasar lotes más antiguos del mismo fondo (obligatorio FIFO) ──
+            isin_lots = lots_by_isin[isin]
+            for k in range(fifo_idx):
+                if k in handled[isin]:
+                    continue
+                older = isin_lots[k]
+                older_price = self.current_prices.get(isin, 0.0)
+                units = older["Participaciones_Restantes"]
+                amount = units * older_price
+                gain_diferida = (older_price - older["Precio_Compra_Unitario"]) * units
+
+                traspasos.append({
+                    "ISIN": isin,
+                    "Fondo": older.get("Fondo", isin),
+                    "Fecha_Compra": older["Fecha"],
+                    "Participaciones": round(units, 6),
+                    "Importe_Traspasado": round(amount, 2),
+                    "Plusvalia_Diferida": round(gain_diferida, 2),
+                    "Precio_Compra_Unitario": older["Precio_Compra_Unitario"],
+                    "Nota": "Traspaso exento — Art. 94 Ley 35/2006 IRPF",
+                })
+                handled[isin].add(k)
+
+            # ── Reembolsar este lote (parcial o total) ──
+            if fifo_idx in handled[isin]:
+                continue  # ya procesado
+
+            lot_value = lot["Participaciones_Restantes"] * price
+            if lot_value <= remaining:
+                units = lot["Participaciones_Restantes"]
+                amount = lot_value
+            else:
+                units = remaining / price
+                amount = remaining
+
+            gain = (price - lot["Precio_Compra_Unitario"]) * units
+            total_gain += gain
+            remaining -= amount
+
+            reembolsos.append({
+                "ISIN": isin,
+                "Fondo": lot.get("Fondo", isin),
+                "Fecha_Compra": lot["Fecha"],
+                "Participaciones": round(units, 6),
+                "Importe": round(amount, 2),
+                "Ganancia_Patrimonial": round(gain, 2),
+                "Precio_Compra_Unitario": lot["Precio_Compra_Unitario"],
+            })
+            handled[isin].add(fifo_idx)
+
+        return {
+            "total_gain": total_gain,
+            "reembolsos": reembolsos,
+            "traspasos": traspasos,
+        }
+
+    # ------------------------------------------------------------------
+    # Cartera resultante tras las operaciones
+    # ------------------------------------------------------------------
+
+    def _portfolio_after(
+        self,
+        lots_by_isin: Dict[str, List[Dict]],
+        traspasos: List[Dict],
+        reembolsos: List[Dict],
+        destination: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Calcula la composición de cartera estimada tras ejecutar el plan
+        (traspasos + reembolso en efectivo).
+
+        Returns:
+            Lista de dicts por fondo: isin, nombre, valor_antes, valor_despues,
+            cambio_valor, participaciones_antes, participaciones_despues,
+            es_destino, operacion ("traspaso_out" | "reembolso" | "sin_cambio" | "destino").
+        """
+        # Valor actual por fondo
+        valor_por_isin: Dict[str, float] = {}
+        partic_por_isin: Dict[str, float] = {}
+        nombre_por_isin: Dict[str, str] = {}
+
+        for isin, lotes in lots_by_isin.items():
+            price = self.current_prices.get(isin, 0.0)
+            total_partic = sum(l["Participaciones_Restantes"] for l in lotes)
+            valor_por_isin[isin] = round(total_partic * price, 2)
+            partic_por_isin[isin] = total_partic
+            nombre_por_isin[isin] = lotes[0].get("Fondo", isin) if lotes else isin
+
+        # Importes a restar por fondo
+        restar_traspaso: Dict[str, float] = defaultdict(float)
+        for t in traspasos:
+            restar_traspaso[t["ISIN"]] += t["Importe_Traspasado"]
+
+        restar_reembolso: Dict[str, float] = defaultdict(float)
+        for r in reembolsos:
+            restar_reembolso[r["ISIN"]] += r["Importe"]
+
+        # Importe total que llega al destino
+        importe_destino = sum(t["Importe_Traspasado"] for t in traspasos)
+        dest_isin = destination.get("isin", "")
+        dest_nombre = destination.get("nombre", dest_isin)
+
+        # Construir resultado
+        all_isins = set(valor_por_isin) | {dest_isin}
+        result = []
+        for isin in all_isins:
+            antes = valor_por_isin.get(isin, 0.0)
+            partic_antes = partic_por_isin.get(isin, 0.0)
+            nombre = nombre_por_isin.get(isin, dest_nombre if isin == dest_isin else isin)
+
+            # Calcular cambios
+            delta = 0.0
+            operacion: str = "sin_cambio"
+
+            if isin == dest_isin:
+                delta += importe_destino
+                # Si ya estaba en cartera y recibe traspasos
+                operacion = "destino"
+
+            if isin in restar_traspaso:
+                delta -= restar_traspaso[isin]
+                operacion = "traspaso_out" if isin not in restar_reembolso else "traspaso_out+reembolso"
+
+            if isin in restar_reembolso:
+                delta -= restar_reembolso[isin]
+                operacion = "reembolso" if isin not in restar_traspaso else operacion
+
+            despues = max(0.0, round(antes + delta, 2))
+
+            # Participaciones estimadas despues (precio actual)
+            price = self.current_prices.get(isin, 0.0)
+            partic_despues: Optional[float] = None
+            if price > 0:
+                partic_despues = round(despues / price, 6)
+
+            result.append({
+                "isin": isin,
+                "nombre": nombre,
+                "valor_antes": antes,
+                "valor_despues": despues,
+                "cambio_valor": round(delta, 2),
+                "participaciones_antes": round(partic_antes, 6),
+                "participaciones_despues": partic_despues,
+                "es_destino": isin == dest_isin,
+                "operacion": operacion,
+            })
+
+        # Ordenar: destino primero, luego por valor descendente
+        result.sort(key=lambda x: (-x["es_destino"], -x["valor_despues"]))
+        return result
+
+    # ------------------------------------------------------------------
+    # optimize_withdrawal — FIFO multi-fondo (sin traspasos)
+    # ------------------------------------------------------------------
 
     def optimize_withdrawal(self, target_amount: float) -> Dict[str, Any]:
         """
-        Calcula el plan de retirada óptimo para minimizar impuestos.
+        Plan de retirada óptimo sin traspasos: elige el fondo con el
+        lote FIFO de menor plusvalía relativa en cada paso.
         """
         self._fetch_current_prices()
-        
-        open_lots = [lot.copy() for lot in self.portfolio.get_open_lots()]
-        
-        # Agrupar lotes por ISIN
-        lots_by_isin = {}
-        for lot in open_lots:
-            isin = lot['ISIN']
-            if isin not in lots_by_isin:
-                lots_by_isin[isin] = []
-            lots_by_isin[isin].append(lot)
-            
-        # Asegurar orden cronológico
-        for isin in lots_by_isin:
-            lots_by_isin[isin] = sorted(lots_by_isin[isin], key=lambda x: x['Fecha'])
 
-        remaining_to_withdraw = target_amount
+        lots_by_isin: Dict[str, List[Dict]] = defaultdict(list)
+        for lot in self.portfolio.get_open_lots():
+            lots_by_isin[lot["ISIN"]].append(lot.copy())
+        for isin in lots_by_isin:
+            lots_by_isin[isin].sort(key=lambda x: x["Fecha"])
+
+        result = self._direct_fifo_plan(lots_by_isin, target_amount)
+        # Rename key for backwards compat with existing endpoint
         withdrawal_plan = []
-        total_capital_gain = 0.0
-        
-        while remaining_to_withdraw > 0.01:
-            best_isin = None
-            best_gain_pct = float('inf')
-            
-            # Buscar el ISIN con el lote más antiguo menos rentable
-            for isin, lots in lots_by_isin.items():
-                if not lots:
-                    continue
-                
-                oldest_lot = lots[0]
-                current_price = self.current_prices.get(isin, 0)
-                if current_price == 0:
-                    continue # Skip if we don't have a price
-                    
-                buy_price = oldest_lot['Precio_Compra_Unitario']
-                # Rentabilidad = (Precio Actual - Precio Compra) / Precio Compra
-                gain_pct = (current_price - buy_price) / buy_price if buy_price > 0 else float('inf')
-                
-                if gain_pct < best_gain_pct:
-                    best_gain_pct = gain_pct
-                    best_isin = isin
-                    
-            if not best_isin:
-                logger.warning("No hay suficientes fondos con precio conocido para alcanzar el objetivo.")
-                break
-                
-            # Vender del best_isin
-            lot_to_sell = lots_by_isin[best_isin][0]
-            current_price = self.current_prices[best_isin]
-            buy_price = lot_to_sell['Precio_Compra_Unitario']
-            
-            # ¿Cuánto vale este lote actualmente?
-            lot_current_value = lot_to_sell['Participaciones_Restantes'] * current_price
-            
-            if lot_current_value <= remaining_to_withdraw:
-                # Vender el lote completo
-                amount_sold = lot_current_value
-                units_sold = lot_to_sell['Participaciones_Restantes']
-                gain = (current_price - buy_price) * units_sold
-                
-                withdrawal_plan.append({
-                    'ISIN': best_isin,
-                    'Fondo': lot_to_sell['Fondo'],
-                    'Fecha_Compra': lot_to_sell['Fecha'],
-                    'Participaciones_Vendidas': units_sold,
-                    'Importe_Retirado': amount_sold,
-                    'Ganancia_Patrimonial': gain
-                })
-                
-                remaining_to_withdraw -= amount_sold
-                total_capital_gain += gain
-                lots_by_isin[best_isin].pop(0) # Remover el lote ya que se vendió completo
-            else:
-                # Vender parte del lote
-                amount_sold = remaining_to_withdraw
-                units_sold = amount_sold / current_price
-                gain = (current_price - buy_price) * units_sold
-                
-                withdrawal_plan.append({
-                    'ISIN': best_isin,
-                    'Fondo': lot_to_sell['Fondo'],
-                    'Fecha_Compra': lot_to_sell['Fecha'],
-                    'Participaciones_Vendidas': units_sold,
-                    'Importe_Retirado': amount_sold,
-                    'Ganancia_Patrimonial': gain
-                })
-                
-                lot_to_sell['Participaciones_Restantes'] -= units_sold
-                remaining_to_withdraw = 0
-                total_capital_gain += gain
-                
+        for s in result["steps"]:
+            withdrawal_plan.append({
+                "ISIN": s["ISIN"],
+                "Fondo": s["Fondo"],
+                "Fecha_Compra": s["Fecha_Compra"],
+                "Participaciones_Vendidas": s["Participaciones"],
+                "Importe_Retirado": s["Importe"],
+                "Ganancia_Patrimonial": s["Ganancia_Patrimonial"],
+            })
+
+        total_capital_gain = result["total_gain"]
         estimated_tax = self.calculate_taxes(total_capital_gain)
-        
+        remaining = max(0.0, target_amount - sum(s["Importe_Retirado"] for s in withdrawal_plan))
+
         return {
-            'target_amount': target_amount,
-            'withdrawn_amount': target_amount - remaining_to_withdraw,
-            'total_capital_gain': total_capital_gain,
-            'estimated_tax': estimated_tax,
-            'net_amount': (target_amount - remaining_to_withdraw) - estimated_tax,
-            'plan': withdrawal_plan
+            "target_amount": target_amount,
+            "withdrawn_amount": round(target_amount - remaining, 2),
+            "total_capital_gain": round(total_capital_gain, 2),
+            "estimated_tax": round(estimated_tax, 2),
+            "net_amount": round((target_amount - remaining) - estimated_tax, 2),
+            "plan": withdrawal_plan,
         }
+
+    # ------------------------------------------------------------------
+    # Helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _empty_result(target_amount: float, nota: str) -> Dict[str, Any]:
+        empty_esc = {"ganancia_patrimonial": 0.0, "impuesto": 0.0,
+                     "neto_recibido": 0.0, "detalle": []}
+        return {
+            "target_amount": target_amount,
+            "total_portfolio_value": 0.0,
+            "escenario_directo": empty_esc,
+            "escenario_optimizado": empty_esc,
+            "ahorro_fiscal": 0.0,
+            "ahorro_fiscal_pct": 0.0,
+            "plan_traspasos": [],
+            "plan_reembolso": [],
+            "importe_traspasado": 0.0,
+            "plusvalia_diferida": 0.0,
+            "fondos_afectados": [],
+            "destination_fund": {
+                "isin": _FALLBACK_INDEX_FUNDS[0]["isin"],
+                "nombre": _FALLBACK_INDEX_FUNDS[0]["nombre"],
+                "tipo": "new_suggestion",
+                "is_index": True,
+                "motivo": _FALLBACK_INDEX_FUNDS[0]["motivo"],
+            },
+            "destination_alternatives": [
+                f for f in _FALLBACK_INDEX_FUNDS if f["isin"] != _FALLBACK_INDEX_FUNDS[0]["isin"]
+            ],
+            "portfolio_after": [],
+            "notas": nota,
+        }
+
+
+

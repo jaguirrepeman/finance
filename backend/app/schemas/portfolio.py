@@ -43,6 +43,8 @@ class AnalysisResponse(BaseModel):
     summary: PortfolioSummary
     funds: List[FundBase]
     recommendation: Dict[str, Dict[str, str]]
+    real_evolution: Optional[Dict[str, Any]] = None
+    built_at: Optional[str] = None  # ISO timestamp when this response was built
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +162,69 @@ class TraspasoFundItem(BaseModel):
     cualifica_traspaso: bool = True
 
 
+# ---------------------------------------------------------------------------
+# Optimización de retirada via traspaso (greedy global FIFO)
+# ---------------------------------------------------------------------------
+
+class TraspasoOptimizeRequest(BaseModel):
+    """Petición de optimización de retirada vía traspaso."""
+    target_amount: float = Field(..., gt=0, description="Cantidad a retirar en €")
+
+
+class TraspasoLotStep(BaseModel):
+    """Detalle de un lote en el plan de traspaso o reembolso."""
+    ISIN: str
+    Fondo: str = ""
+    Fecha_Compra: Optional[str] = None
+    Participaciones: float = 0.0
+    # Reembolso
+    Importe: Optional[float] = None
+    Ganancia_Patrimonial: Optional[float] = None
+    # Traspaso
+    Importe_Traspasado: Optional[float] = None
+    Plusvalia_Diferida: Optional[float] = None
+    Destination_ISIN: Optional[str] = None
+    Destination_Fondo: Optional[str] = None
+    Precio_Compra_Unitario: float = 0.0
+    Nota: Optional[str] = None
+
+
+class EscenarioFiscal(BaseModel):
+    """Resultado fiscal de un escenario (directo u optimizado)."""
+    ganancia_patrimonial: float = 0.0
+    impuesto: float = 0.0
+    neto_recibido: float = 0.0
+    detalle: List[TraspasoLotStep] = []
+
+
+class DestinationFund(BaseModel):
+    """Fondo destino para los traspasos."""
+    isin: str
+    nombre: str = ""
+    tipo: str = "new_suggestion"   # "portfolio_index" | "new_suggestion"
+    is_index: bool = True
+    motivo: str = ""
+
+
+class TraspasoOptimizeResponse(BaseModel):
+    """Respuesta completa de la optimización global de retirada vía traspaso."""
+    target_amount: float
+    total_portfolio_value: float = 0.0
+    escenario_directo: EscenarioFiscal
+    escenario_optimizado: EscenarioFiscal
+    ahorro_fiscal: float = 0.0
+    ahorro_fiscal_pct: float = 0.0
+    plan_traspasos: List[TraspasoLotStep] = []
+    plan_reembolso: List[TraspasoLotStep] = []
+    importe_traspasado: float = 0.0
+    plusvalia_diferida: float = 0.0
+    fondos_afectados: List[str] = []
+    destination_fund: Optional[DestinationFund] = None
+    destination_alternatives: List[Dict[str, Any]] = []
+    portfolio_after: List[Dict[str, Any]] = []
+    notas: str = ""
+
+
 class SimulationRequest(BaseModel):
     """Petición de simulación: añadir X€ a un fondo."""
     isin: str
@@ -191,4 +256,29 @@ class SimulationResponse(BaseModel):
     history_fund: List[Dict[str, Any]] = []
     history_simulated: List[Dict[str, Any]] = []
     # Period returns [{label, current, fund, simulated}] — % total or CAGR
+    period_returns: List[Dict[str, Any]] = []
+
+
+class RebalanceFundDetail(BaseModel):
+    """Movimiento necesario en el rebalanceo para un fondo."""
+    isin: str
+    name: str = ""
+    current_weight: float = 0.0
+    target_weight: float = 0.0
+    delta_eur: float = 0.0
+
+
+class RebalanceRequest(BaseModel):
+    """Petición de rebalanceo: pesos objetivo por ISIN (fracción, suma = 1)."""
+    weights: Dict[str, float] = Field(..., description="ISIN → fracción objetivo (0-1)")
+
+
+class RebalanceResponse(BaseModel):
+    """Resultado del rebalanceo simulado."""
+    total_value: float
+    current_portfolio_metrics: Dict[str, Optional[float]] = {}
+    simulated_portfolio_metrics: Dict[str, Optional[float]] = {}
+    funds: List[RebalanceFundDetail] = []
+    history_current: List[Dict[str, Any]] = []
+    history_simulated: List[Dict[str, Any]] = []
     period_returns: List[Dict[str, Any]] = []

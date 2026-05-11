@@ -93,7 +93,7 @@ class AsyncPortfolioCore:
 
         for isin in isins:
             name = name_from_mov.get(isin)
-            if name and not _ISIN_PATTERN.match(name.strip()):
+            if isinstance(name, str) and name and not _ISIN_PATTERN.match(name.strip()):
                 continue
             isins_need_name.append(isin)
 
@@ -106,7 +106,7 @@ class AsyncPortfolioCore:
         def _get_name(isin: str) -> str:
             if isin in name_from_mov:
                 n = name_from_mov[isin]
-                if n and not _ISIN_PATTERN.match(n.strip()):
+                if isinstance(n, str) and n and not _ISIN_PATTERN.match(n.strip()):
                     return n
             if isin in resolved_names:
                 return resolved_names[isin]
@@ -408,6 +408,82 @@ class AsyncPortfolioCore:
         df.attrs["estimated_tax"] = plan["estimated_tax"]
         df.attrs["net_amount"] = plan["net_amount"]
         return df
+
+    async def optimize_withdrawal_via_traspaso(
+        self,
+        target_amount: float,
+    ) -> Dict[str, Any]:
+        """
+        Planifica la retirada óptima usando traspasos previos para minimizar IRPF.
+
+        Algoritmo greedy global (óptimo para impuesto convexo):
+          - Ordena TODOS los lotes de cartera por plusvalía% ascendente.
+          - Selecciona los lotes más baratos para reembolso.
+          - Los lotes FIFO-anteriores del mismo fondo van a traspaso (exento).
+          - Elige el mejor fondo destino (indexado existente en cartera o sugerencia).
+
+        Args:
+            target_amount: Cantidad en € que se desea retirar en efectivo.
+
+        Returns:
+            Dict con escenarios directo/optimizado, ahorro fiscal y planes detallados.
+        """
+        import asyncio as _asyncio
+        import re as _re
+        _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+
+        isins = list(self.portfolio.positions.keys())
+        prices = await self.provider.get_nav_batch(isins)
+
+        # ── Resolver nombres ──
+        mov = self.portfolio.movements
+        name_from_mov: Dict[str, str] = {}
+        if not mov.empty and "Fondo" in mov.columns:
+            name_from_mov = (
+                mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
+                .groupby("ISIN")["Fondo"]
+                .first()
+                .to_dict()
+            )
+        isins_need_name = [
+            i for i in isins
+            if not (name_from_mov.get(i) and not _ISIN_RE.match(name_from_mov[i].strip()))
+        ]
+        resolved: Dict[str, str] = {}
+        if isins_need_name:
+            resolved = await self.provider.resolve_names_batch(isins_need_name)
+
+        def _name(isin: str) -> str:
+            n = name_from_mov.get(isin, "")
+            if n and not _ISIN_RE.match(n.strip()):
+                return n
+            return resolved.get(isin, isin)
+
+        # ── Construir fund_meta para selección de destino ──
+        # Clasificar fondos en paralelo (is_index)
+        from .services.fund_classifier import is_index_fund as _is_index
+
+        async def _get_meta(isin: str):
+            try:
+                info = await self.provider.get_fund_info(isin) or {}
+                name = _name(isin)
+                idx = _is_index(info=info, name=name)
+                return isin, {"name": name, "is_index": idx}
+            except Exception:
+                return isin, {"name": _name(isin), "is_index": False}
+
+        meta_results = await _asyncio.gather(*[_get_meta(i) for i in isins])
+        fund_meta: Dict[str, Dict] = dict(meta_results)
+
+        # ── Enriquecer nombres en lotes abiertos ──
+        for lot in self.portfolio.open_lots:
+            isin = lot["ISIN"]
+            if isin in fund_meta:
+                lot["Fondo"] = fund_meta[isin]["name"]
+
+        # ── Ejecutar optimizador ──
+        optimizer = TaxOptimizer(self.portfolio, prices=prices, fund_meta=fund_meta)
+        return optimizer.optimize_withdrawal_via_traspaso(target_amount)
 
     async def traspaso_analysis(self) -> List[Dict[str, Any]]:
         """
@@ -1226,6 +1302,145 @@ class AsyncPortfolioCore:
             "simulated_portfolio_metrics": simulated_portfolio_metrics,
             "history_current": self._series_to_points(current_series),
             "history_fund": self._series_to_points(fund_series),
+            "history_simulated": self._series_to_points(simulated_series),
+            "period_returns": period_returns,
+        }
+    async def simulate_rebalance(self, target_weights: Dict[str, float]) -> Dict:
+        """Simula rebalanceo de cartera con pesos objetivos.
+
+        Args:
+            target_weights: Diccionario {isin: fracción} donde los valores
+                suman 1.0 (p.ej. {"LU123": 0.4, "IE456": 0.6}).
+
+        Returns:
+            Diccionario con históricos, métricas y movimientos necesarios.
+        """
+        import asyncio
+
+        def _val(v: Any) -> float:
+            if v is None or pd.isna(v):
+                return 0.0
+            return float(v)
+
+        pos = await self.positions(live=True)
+        value_col = "Valor_Actual"
+        if pos.empty or not pos["Valor_Actual"].notna().any():
+            value_col = "Capital_Invertido"
+
+        total_val = _val(pos[value_col].sum()) if not pos.empty else 0.0
+
+        existing_name_map: Dict[str, str] = {}
+        if not pos.empty:
+            existing_name_map = {
+                str(row["ISIN"]): str(row.get("Fondo") or row["ISIN"])
+                for _, row in pos.iterrows()
+            }
+
+        # Current values and weights
+        current_values: Dict[str, float] = {}
+        for _, row in pos.iterrows():
+            row_isin = str(row["ISIN"])
+            name = existing_name_map.get(row_isin, row_isin)
+            current_values[name] = current_values.get(name, 0.0) + _val(row.get(value_col, 0.0))
+
+        # Target values by name
+        isin_to_name: Dict[str, str] = {
+            isin: existing_name_map.get(isin, isin) for isin in target_weights
+        }
+        target_values: Dict[str, float] = {
+            isin_to_name[isin]: w * total_val for isin, w in target_weights.items()
+        }
+
+        # Build weight rows for UI (existing positions + new ISINs from target)
+        seen_isins: set = set()
+        weight_rows = []
+        for _, row in pos.iterrows():
+            row_isin = str(row["ISIN"])
+            if row_isin in seen_isins:
+                continue
+            seen_isins.add(row_isin)
+            name = existing_name_map.get(row_isin, row_isin)
+            cur_val = _val(row.get(value_col, 0.0))
+            tgt_w = target_weights.get(row_isin, 0.0)
+            tgt_val = tgt_w * total_val
+            delta_eur = tgt_val - cur_val
+            weight_rows.append({
+                "ISIN": row_isin,
+                "Fondo": name,
+                "Peso_Actual": round((cur_val / total_val * 100) if total_val > 0 else 0.0, 2),
+                "Peso_Objetivo": round(tgt_w * 100, 2),
+                "Delta_EUR": round(delta_eur, 2),
+            })
+        # Add new ISINs from target_weights that are not in current positions
+        new_isins = [isin for isin in target_weights if isin not in seen_isins]
+        if new_isins:
+            resolved_new = await self.provider.resolve_names_batch(new_isins)
+            for isin in new_isins:
+                name = resolved_new.get(isin, isin)
+                isin_to_name[isin] = name
+                existing_name_map[isin] = name
+                tgt_w = target_weights.get(isin, 0.0)
+                weight_rows.append({
+                    "ISIN": isin,
+                    "Fondo": name,
+                    "Peso_Actual": 0.0,
+                    "Peso_Objetivo": round(tgt_w * 100, 2),
+                    "Delta_EUR": round(tgt_w * total_val, 2),
+                })
+        df_weights = pd.DataFrame(weight_rows).sort_values("Peso_Objetivo", ascending=False).reset_index(drop=True)
+
+        # Fetch price histories for all ISINs (existing + new)
+        all_fetch_isins = list(existing_name_map.keys())
+
+        async def _fetch(target_isin: str) -> tuple[str, str, pd.Series]:
+            history_df = await self.provider.get_nav_history(target_isin, years=15)
+            clean = self._normalize_price_history(history_df)
+            name = existing_name_map.get(target_isin, target_isin)
+            if clean.empty:
+                return target_isin, name, pd.Series(dtype=float)
+            series = clean.set_index("date")["price"].rename(name)
+            return target_isin, name, series
+
+        fetched = await asyncio.gather(*[_fetch(isin) for isin in all_fetch_isins])
+
+        price_series: Dict[str, pd.Series] = {}
+        for target_isin, name, series in fetched:
+            if series.empty:
+                continue
+            cur = price_series.get(name)
+            if cur is None or series.dropna().shape[0] > cur.dropna().shape[0]:
+                price_series[name] = series
+
+        price_df = (
+            pd.concat(price_series.values(), axis=1, join="outer").sort_index()
+            if price_series
+            else pd.DataFrame()
+        )
+
+        current_weights_by_name = {
+            name: val / total_val
+            for name, val in current_values.items()
+            if total_val > 0 and val > 0
+        }
+        simulated_weights_by_name = {
+            isin_to_name[isin]: w
+            for isin, w in target_weights.items()
+            if w > 0 and isin in isin_to_name
+        }
+
+        current_series = self._build_weighted_portfolio_series(price_df, current_weights_by_name)
+        simulated_series = self._build_weighted_portfolio_series(price_df, simulated_weights_by_name)
+
+        current_metrics = self._compute_series_metrics(current_series)
+        simulated_metrics = self._compute_series_metrics(simulated_series)
+        period_returns = self._build_period_returns(current_series, pd.Series(dtype=float), simulated_series)
+
+        return {
+            "weights": df_weights,
+            "metadata": {"total_value": total_val},
+            "current_portfolio_metrics": current_metrics,
+            "simulated_portfolio_metrics": simulated_metrics,
+            "history_current": self._series_to_points(current_series),
             "history_simulated": self._series_to_points(simulated_series),
             "period_returns": period_returns,
         }

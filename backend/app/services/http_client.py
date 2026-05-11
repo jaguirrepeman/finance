@@ -14,6 +14,7 @@ Uso:
         return resp.json()
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -36,16 +37,33 @@ _RETRY_BACKOFF_FACTOR = 0.5  # 0.5s, 1s, 2s
 # ---------------------------------------------------------------------------
 
 _client_instance: Optional[httpx.AsyncClient] = None
+_client_loop: Optional[asyncio.AbstractEventLoop] = None  # loop at creation time
 
 
 def get_http_client() -> httpx.AsyncClient:
     """Retorna el singleton httpx.AsyncClient.
 
-    Crea la instancia en la primera llamada con connection pooling
-    y timeouts configurados.
+    Crea (o recrea) la instancia con connection pooling y timeouts configurados.
+    Si el event loop actual difiere del loop en que se creó el cliente anterior,
+    el cliente se recrea para evitar el error "Lock is bound to a different event loop".
     """
-    global _client_instance
-    if _client_instance is None or _client_instance.is_closed:
+    global _client_instance, _client_loop
+
+    # Detectar el loop actual (solo desde contexto async; es None en contextos sync)
+    try:
+        current_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    loop_changed = (
+        current_loop is not None
+        and _client_loop is not None
+        and _client_loop is not current_loop
+    )
+
+    if _client_instance is None or _client_instance.is_closed or loop_changed:
+        if loop_changed:
+            logger.debug("HTTP client: event loop changed, recreating AsyncClient")
         _client_instance = httpx.AsyncClient(
             timeout=httpx.Timeout(_DEFAULT_TIMEOUT, connect=10.0),
             limits=httpx.Limits(
@@ -62,6 +80,7 @@ def get_http_client() -> httpx.AsyncClient:
                 ),
             },
         )
+        _client_loop = current_loop
     return _client_instance
 
 

@@ -26,6 +26,11 @@ aiosqlite = "^0.20.0"
 pytest = "*"
 jupyter = "^1.1.1"
 nbformat = "^5.10.4"
+plotly = "*"
+seaborn = "*"
+matplotlib = "*"
+ipykernel = "*"
+ipywidgets = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

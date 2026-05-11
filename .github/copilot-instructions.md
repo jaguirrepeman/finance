@@ -54,21 +54,6 @@ Key rules:
 - Configuration files (YAML/Hydra) for hyperparameters -- never hardcode them.
 - Notebooks are for exploration only -- extract production code into src/.
 
-## 5. Feature Engineering
-- Each transformation = one independent function or class.
-- Use sklearn Pipelines (or equivalent) to chain transformations.
-- Document feature importance and selection rationale.
-
-## 6. Modeling & Training
-- Separate scripts: model definition, training loop, evaluation.
-- Hyperparameter tuning via Optuna or Hyperopt.
-- Cross-validation stratified by target variable; temporal validation for time-series.
-- Early stopping + checkpointing for long-running training.
-
-## 7. Evaluation & Metrics
-- Classification: accuracy, precision, recall, F1-score, ROC-AUC.
-- Regression: MAPE, MAE, RMSE, R-squared.
-- Always produce visualizations: learning curves, feature importance, residual analysis.
 
 ## 8. Testing
 - Framework: pytest with fixtures in conftest.py.
@@ -126,3 +111,10 @@ This project follows a **thin-notebook / thick-backend** pattern:
 
 6. **Orden de desarrollo preferido:**  
    `services/` → `client.py` → `endpoints.py` → `notebook` (visualización).
+
+7. **Actualización del dashboard**
+   Cada vez que toques components.js, actualizas el jsx.
+
+8. **Consistencia entre notebooks y endpoints**
+   Si añades un nuevo endpoint, haz un ejemplo en el notebook. Si añades una nueva métrica, hazla visible en el notebook. El notebook es la demo de tu API, no lo dejes obsoleto.
+

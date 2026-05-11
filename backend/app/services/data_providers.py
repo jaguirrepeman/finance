@@ -686,7 +686,20 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
                 except AttributeError:
                     date_str = str(last_idx)[:10]
                 self._last_nav_dates[isin] = date_str
-                return float(hist["Close"].iloc[-1])
+                price = float(hist["Close"].iloc[-1])
+                currency = ticker.info.get("currency", "EUR") if ticker.info else "EUR"
+                if currency == "USD":
+                    fx = yf.Ticker("USDEUR=X")
+                    fx_hist = fx.history(period="2d")
+                    if fx_hist is not None and not fx_hist.empty:
+                        price = price * float(fx_hist["Close"].iloc[-1])
+                elif currency == "GBp":
+                    # London-listed prices quoted in pence — convert to GBP then EUR
+                    fx_gbp = yf.Ticker("GBPEUR=X")
+                    fx_hist = fx_gbp.history(period="2d")
+                    if fx_hist is not None and not fx_hist.empty:
+                        price = (price / 100.0) * float(fx_hist["Close"].iloc[-1])
+                return price
             return None
 
         try:
@@ -705,13 +718,39 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
             period = period_map.get(years, f"{years}y")
             ticker = yf.Ticker(isin)
             hist = ticker.history(period=period)
-            if hist is not None and not hist.empty:
-                df = hist.reset_index()[["Date", "Close"]].rename(
-                    columns={"Date": "date", "Close": "price"}
-                )
-                df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-                return df.reset_index(drop=True)
-            return pd.DataFrame(columns=["date", "price"])
+            if hist is None or hist.empty:
+                return pd.DataFrame(columns=["date", "price"])
+            df = hist.reset_index()[["Date", "Close"]].rename(
+                columns={"Date": "date", "Close": "price"}
+            )
+            df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+            # Convert USD/GBp prices to EUR
+            currency = ticker.info.get("currency", "EUR") if ticker.info else "EUR"
+            if currency == "USD":
+                fx = yf.Ticker("USDEUR=X")
+                fx_hist = fx.history(period=period)
+                if fx_hist is not None and not fx_hist.empty:
+                    fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
+                        columns={"Date": "date", "Close": "fx"}
+                    )
+                    fx_df["date"] = pd.to_datetime(fx_df["date"]).dt.tz_localize(None)
+                    df = df.merge(fx_df, on="date", how="left")
+                    df["fx"] = df["fx"].ffill().bfill()
+                    df["price"] = df["price"] * df["fx"]
+                    df = df.drop(columns=["fx"])
+            elif currency == "GBp":
+                fx = yf.Ticker("GBPEUR=X")
+                fx_hist = fx.history(period=period)
+                if fx_hist is not None and not fx_hist.empty:
+                    fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
+                        columns={"Date": "date", "Close": "fx"}
+                    )
+                    fx_df["date"] = pd.to_datetime(fx_df["date"]).dt.tz_localize(None)
+                    df = df.merge(fx_df, on="date", how="left")
+                    df["fx"] = df["fx"].ffill().bfill()
+                    df["price"] = (df["price"] / 100.0) * df["fx"]
+                    df = df.drop(columns=["fx"])
+            return df.reset_index(drop=True)
 
         try:
             return await asyncio.to_thread(_sync)
@@ -898,6 +937,20 @@ class FMPAsyncProvider(AsyncFundDataProvider):
 # ---------------------------------------------------------------------------
 
 
+# ISINs priced in a foreign currency (e.g. USD) — Finect may return
+# the raw foreign-currency price without conversion.  Force yfinance,
+# which explicitly converts to EUR via the FX rate.
+#
+# XS2940466316: iShares Bitcoin ETP — listed on Amsterdam (AMS) in USD.
+#   yfinance reports currency="USD"; the EUR-denominated class on Xetra
+#   uses the same ISIN but yfinance resolves to the AMS/USD listing.
+#   Adding here forces USD→EUR FX conversion in get_nav and get_nav_history.
+_FORCE_YF_ISINS: frozenset = frozenset([
+    "IE00B4ND3602",  # iShares Physical Gold ETC (USD-priced on exchange)
+    "XS2940466316",  # iShares Bitcoin ETP (Amsterdam USD listing; need EUR conversion)
+])
+
+
 class CompositeAsyncProvider:
     """Proveedor compuesto async con estrategia dual.
 
@@ -946,6 +999,19 @@ class CompositeAsyncProvider:
 
     async def get_nav(self, isin: str) -> Optional[float]:
         """NAV actual con early termination sobre la cadena."""
+        # For USD-priced instruments, always use yfinance (handles FX conversion).
+        if isin in _FORCE_YF_ISINS:
+            try:
+                price = await self._yf.get_nav(isin)
+                if price and price > 0:
+                    nav_date = await self._yf.get_nav_date(isin)
+                    await self._cache.aset(CacheStore.nav_key(isin), price, TTL_NAV)
+                    if nav_date:
+                        await self._cache.aset(CacheStore.nav_date_key(isin), nav_date, TTL_NAV)
+                    return price
+            except Exception as e:
+                logger.debug("YF.get_nav(%s) fallback failed: %s", isin, e)
+
         # Check cache primero
         if not self._force_refresh:
             cached = await self._cache.aget(CacheStore.nav_key(isin))
@@ -1009,6 +1075,24 @@ class CompositeAsyncProvider:
 
     async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
         """Histórico: gather todos los providers, devuelve la serie más larga."""
+        # For USD-priced instruments, always fetch from yfinance (handles FX).
+        if isin in _FORCE_YF_ISINS:
+            try:
+                df = await self._yf.get_nav_history(isin, years=years)
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+                    cache_data = df[["date", "price"]].copy()
+                    cache_data["date"] = cache_data["date"].dt.strftime("%Y-%m-%d")
+                    await self._cache.aset(
+                        CacheStore.nav_history_key(isin, years),
+                        cache_data.to_dict(orient="records"),
+                        TTL_NAV_HISTORY,
+                    )
+                    return df
+            except Exception as e:
+                logger.debug("YF.get_nav_history(%s) failed: %s", isin, e)
+
         # Check cache
         if not self._force_refresh:
             cached = await self._cache.aget(CacheStore.nav_history_key(isin, years))

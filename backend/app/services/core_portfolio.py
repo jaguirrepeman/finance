@@ -52,13 +52,17 @@ class Portfolio:
         self.open_lots: List[Dict] = []
         self.positions: Dict[str, float] = {}
         self.movements: pd.DataFrame = pd.DataFrame()
+        # ISINs identificados como ETFs (no aplica corrección de localización Excel)
+        self._etf_isins: set = set()
 
         if source is None:
             pass  # Portfolio vacío; el llamador puede popularlo manualmente
         elif isinstance(source, str):
             if source.endswith(".tsv"):
                 self._load_from_tsv(source)
-            elif source.endswith(".xlsx") or source.endswith(".csv"):
+            elif source.endswith(".csv"):
+                self._load_from_broker_csv(source)
+            elif source.endswith(".xlsx"):
                 self._load_from_excel(source)
             else:
                 raise ValueError("Solo se soportan archivos .xlsx, .csv o .tsv")
@@ -129,6 +133,26 @@ class Portfolio:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
         df = pd.read_excel(filepath)
+        self._process_orders_df(df)
+
+    def _load_from_broker_csv(self, filepath: str) -> None:
+        """Lee el CSV de órdenes del broker (separador ';') y delega a _process_orders_df.
+
+        A diferencia del TSV/Excel, este archivo ya exporta participaciones con
+        coma decimal correcta (e.g. "10,404"), por lo que la corrección de
+        localización Excel español (dividir enteros por 1000) NO se aplica:
+        los valores no enteros la omiten automáticamente en _fix_localization.
+
+        El archivo CSV del broker contiene las columnas:
+            - Fecha de la orden   → Fecha
+            - ISIN                → ISIN
+            - Importe estimado    → Importe (e.g. "1000 EUR")
+            - Nº de participaciones → Participaciones (decimal con coma, e.g. "10,404")
+            - Estado              → Estado
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
+        df = pd.read_csv(filepath, sep=";", encoding="utf-8", dtype=str)
         self._process_orders_df(df)
 
     def _load_from_tsv(self, filepath: str) -> None:
@@ -216,21 +240,15 @@ class Portfolio:
         """Corrige el bug de localización de Excel español.
 
         Excel puede exportar 5,317 como el entero 5317 (elimina la coma
-        decimal). Detectamos el caso cuando el NAV implícito
-        (importe / participaciones) es irrazonablemente bajo (< 5 €).
+        decimal). El ÚNICO indicador fiable es que el valor sea entero:
+        _clean_float ya convirtió comas europeas a puntos, así que
+        cualquier entero restante es un artefacto de localización.
 
-        Si importe es 0 pero las participaciones son enteras ≥ 1000,
-        también se asume localización errónea.
+        Los valores no-enteros ya son correctos tras el parseo.
         """
-        if units % 1 == 0:
-            return units/1000.0
-        if units < 100 or (units % 1 != 0):
-            return units
-        if amount > 0 and (amount / units) < 5.0:
+        if units % 1 == 0:  # integer → localization artifact → divide by 1000
             return units / 1000.0
-        if amount == 0 and units >= 1000:
-            return units / 1000.0
-        return units
+        return units  # non-integer → already correct after _clean_float
 
     def _apply_fifo(self, isin: str, group: pd.DataFrame) -> None:
         """Aplica contabilidad FIFO a las transacciones de un ISIN."""
@@ -251,8 +269,10 @@ class Portfolio:
                 units = abs(units)
 
             # Corrección de localización Excel español (aplica a compras Y ventas)
+            # Para ETFs las participaciones son enteros reales — no aplicar.
             # original_units = units
-            units = self._fix_localization(units, amount)
+            if isin not in self._etf_isins:
+                units = self._fix_localization(units, amount)
             # if units != original_units:
             #     logger.debug(
             #         "Corrección de localización para ISIN %s: %.4f → %.4f participaciones",
@@ -297,6 +317,128 @@ class Portfolio:
         remaining = sum(l["Participaciones_Restantes"] for l in purchases)
         if remaining > 0.0001:
             self.positions[isin] = remaining
+
+    # -------------------------------------------------------------------------
+    # Loaders para fuentes externas de ETFs
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_myinvestor_etf_df(filepath: str) -> pd.DataFrame:
+        """Lee el Excel de MyInvestor ETF y lo normaliza al formato canónico.
+
+        Columnas de entrada: FECHA, ISIN, Titulos, Precio, Comision, Importe_Neto.
+        Columnas de salida:  ISIN, Fecha, Participaciones, Importe, Estado, Tipo, Fondo.
+        """
+        import shutil, tempfile, os
+        # Copiar a temp para evitar bloqueos de OneDrive/Excel
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            shutil.copy2(filepath, tmp_path)
+            df = pd.read_excel(tmp_path)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        df = df.rename(columns={
+            "FECHA": "Fecha",
+            "Titulos": "Participaciones",
+            "Importe_Neto": "Importe",
+        })
+        df["ISIN"] = df["ISIN"].astype(str).str.strip().str.upper()
+        df["Participaciones"] = df["Participaciones"].astype(float)
+        df["Importe"] = df["Importe"].abs().astype(float)
+        df["Estado"] = "Finalizada"
+        df["Tipo"] = "Compra"
+        df["Fondo"] = df["ISIN"]  # nombre desconocido; usar ISIN
+
+        # Corregir años claramente incorrectos (ej. 2925 → 2025)
+        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+        mask_bad_year = df["Fecha"].dt.year > 2100
+        if mask_bad_year.any():
+            df.loc[mask_bad_year, "Fecha"] = df.loc[mask_bad_year, "Fecha"].apply(
+                lambda d: d.replace(year=d.year - 900) if pd.notna(d) else d
+            )
+            logger.warning(
+                "MyInvestorETF: corregidos %d registros con año erróneo (>2100)",
+                mask_bad_year.sum(),
+            )
+
+        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"]]
+
+    @staticmethod
+    def _normalize_traderepublic_df(filepath: str) -> pd.DataFrame:
+        """Lee el CSV de TradeRepublic, filtra la categoría TRADING y normaliza.
+
+        Columnas de entrada: date, symbol, shares, amount, type, category, name.
+        Columnas de salida:  ISIN, Fecha, Participaciones, Importe, Estado, Tipo, Fondo.
+        """
+        df = pd.read_csv(filepath, sep=None, engine="python")
+        df = df[df["category"] == "TRADING"].copy()
+        if df.empty:
+            return pd.DataFrame(columns=["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"])
+
+        df = df.rename(columns={
+            "date": "Fecha",
+            "symbol": "ISIN",
+            "shares": "Participaciones",
+            "amount": "Importe",
+            "name": "Fondo",
+            "type": "Tipo",
+        })
+        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+        df["Importe"] = df["Importe"].abs().astype(float)
+        df["Estado"] = "Finalizada"
+        # TradeRepublic usa BUY/SELL; traducir a Compra/Venta
+        df["Tipo"] = df["Tipo"].map({"BUY": "Compra", "SELL": "Venta"}).fillna("Compra")
+        df["ISIN"] = df["ISIN"].astype(str).str.strip().str.upper()
+
+        # Participaciones: negativas para ventas (mismo formato que TSV de MyInvestor)
+        df["Participaciones"] = df["Participaciones"].astype(float).abs()
+        sell_mask = df["Tipo"] == "Venta"
+        df.loc[sell_mask, "Participaciones"] = -df.loc[sell_mask, "Participaciones"]
+
+        # Usar ISIN como nombre de fondo cuando el campo está vacío o es NaN
+        df["Fondo"] = df["Fondo"].where(df["Fondo"].notna() & (df["Fondo"].astype(str).str.strip() != ""), df["ISIN"])
+
+        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"]]
+
+    def load_extra_orders(self, df: pd.DataFrame, etf_isins: Optional[set] = None) -> None:
+        """Incorpora órdenes adicionales (ya normalizadas) a la cartera.
+
+        Las órdenes se añaden a ``self.movements`` respetando el orden temporal
+        global y se aplica FIFO incremental sobre los ISINs nuevos.
+
+        Args:
+            df: DataFrame normalizado con columnas
+                [ISIN, Fecha, Participaciones, Importe, Estado, Tipo, Fondo].
+            etf_isins: ISINs que NO deben sufrir la corrección de localización.
+        """
+        if etf_isins:
+            self._etf_isins.update(etf_isins)
+
+        df = df[df["Estado"] == "Finalizada"].copy()
+        if df.empty:
+            return
+
+        df = df.sort_values("Fecha").reset_index(drop=True)
+
+        if not self.movements.empty:
+            self.movements = (
+                pd.concat([self.movements, df], ignore_index=True)
+                .sort_values("Fecha")
+                .reset_index(drop=True)
+            )
+        else:
+            self.movements = df.copy()
+
+        for isin, group in df.groupby("ISIN"):
+            isin_str = str(isin).strip()
+            if isin_str in ("nan", ""):
+                continue
+            self._apply_fifo(isin_str, group)
 
     def _load_from_list(self, data: List[Dict]) -> None:
         """Carga posiciones simples desde una lista de dicts [{ISIN, Participaciones}]."""
