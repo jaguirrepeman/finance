@@ -68,7 +68,8 @@ Referencias:
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -77,6 +78,38 @@ from .fund_classifier import FundType, classify_fund
 from .utils import safe_float
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# In-memory TTL cache for expensive computations
+# ---------------------------------------------------------------------------
+
+_CACHE_TTL = 300  # 5 minutes
+
+# opportunity scan: (weights_key, timestamp, data)
+_opp_scan_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+# single fund opportunity: (isin+weights_key, timestamp, data)
+_opp_fund_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def _weights_cache_key(weights: Dict[str, float] | None) -> str:
+    """Deterministic cache key from weights dict."""
+    if not weights:
+        return "default"
+    return ",".join(f"{k}:{v}" for k, v in sorted(weights.items()))
+
+
+def _cache_get(cache: dict, key: str) -> Any | None:
+    """Return cached value if it exists and hasn't expired."""
+    entry = cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+        return entry[1]
+    if entry:
+        del cache[key]
+    return None
+
+
+def _cache_set(cache: dict, key: str, value: Any) -> None:
+    cache[key] = (time.monotonic(), value)
 
 # Años de histórico que se piden SIEMPRE internamente.
 _INTERNAL_YEARS = 10
@@ -917,6 +950,13 @@ async def scan_portfolio_opportunities(
         client: Instancia de PortfolioClient.
         weights: Pesos personalizados para las dimensiones del score.
     """
+    # Check in-memory cache first (5 min TTL)
+    cache_key = _weights_cache_key(weights)
+    cached = _cache_get(_opp_scan_cache, cache_key)
+    if cached is not None:
+        logger.debug("scan_portfolio_opportunities: cache hit for %s", cache_key)
+        return cached
+
     pos = client.positions(live=True)
     if pos.empty:
         return []
@@ -998,6 +1038,7 @@ async def scan_portfolio_opportunities(
     opportunities.sort(
         key=lambda x: x.get("timing_score", 0), reverse=True,
     )
+    _cache_set(_opp_scan_cache, cache_key, opportunities)
     return opportunities
 
 
@@ -1007,6 +1048,13 @@ async def scan_fund_opportunity(
     weights: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
     """Calcula las señales de timing para un fondo individual."""
+    # Check in-memory cache first (5 min TTL)
+    cache_key = f"{isin}:{_weights_cache_key(weights)}"
+    cached = _cache_get(_opp_fund_cache, cache_key)
+    if cached is not None:
+        logger.debug("scan_fund_opportunity: cache hit for %s", cache_key)
+        return cached
+
     nav_df, info = await asyncio.gather(
         client.core.provider.get_nav_history(
             isin, years=_INTERNAL_YEARS,
@@ -1038,7 +1086,7 @@ async def scan_fund_opportunity(
 
     interpretation = _interpret_timing(signals["timing_score"])
 
-    return {
+    result = {
         "isin": isin,
         "name": info.get("name", isin),
         "category": info.get("category"),
@@ -1049,6 +1097,8 @@ async def scan_fund_opportunity(
         **signals,
         **interpretation,
     }
+    _cache_set(_opp_fund_cache, cache_key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

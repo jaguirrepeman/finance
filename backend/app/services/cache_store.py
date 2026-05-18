@@ -78,8 +78,12 @@ class CacheStore:
             db_path = base / "cache.db"
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Async write lock to serialize concurrent writes and prevent DB lock errors
-        self._write_lock = asyncio.Lock()
+        # Lazy-initialize the async write lock so it is always created inside
+        # the running event loop that first uses it.  Creating it eagerly in
+        # __init__ (which may run in a background thread / different loop)
+        # causes the "Lock is bound to a different event loop" error.
+        self._write_lock: Optional[asyncio.Lock] = None
+        self._write_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._remove_stale_journal()
         self._init_db()
 
@@ -199,12 +203,36 @@ class CacheStore:
     # API Async (with write lock + retry for "database is locked")
     # ------------------------------------------------------------------
 
+    def _get_write_lock(self) -> asyncio.Lock:
+        """Return the async write lock, (re-)creating it on the running event loop.
+
+        The lock is lazily created so it is always bound to the event loop that
+        first calls an async write.  If the running loop changes (e.g. the app
+        restarts an event loop), a fresh lock is created automatically.
+        """
+        try:
+            current_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        loop_changed = (
+            current_loop is not None
+            and self._write_lock_loop is not None
+            and self._write_lock_loop is not current_loop
+        )
+
+        if self._write_lock is None or loop_changed:
+            self._write_lock = asyncio.Lock()
+            self._write_lock_loop = current_loop
+
+        return self._write_lock
+
     async def _retry_async(self, operation, is_write: bool = False):
         """Execute an async DB operation with retry logic for lock errors."""
         for attempt in range(_MAX_RETRIES):
             try:
                 if is_write:
-                    async with self._write_lock:
+                    async with self._get_write_lock():
                         return await operation()
                 else:
                     return await operation()
@@ -238,6 +266,30 @@ class CacheStore:
             return None
         try:
             return json.loads(value_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    async def aget_stale(self, key: str) -> Optional[Any]:
+        """Devuelve datos de caché aunque hayan expirado (stale fallback).
+
+        A diferencia de ``aget``, no elimina la entrada expirada y la devuelve
+        de todas formas. Útil para el patrón stale-while-revalidate: cuando los
+        proveedores fallan en refrescar el historial, se retorna el último dato
+        válido conocido en lugar de datos vacíos.
+        """
+        async def _op():
+            async with self._aconn() as db:
+                cursor = await db.execute(
+                    "SELECT value FROM cache WHERE key = ?",
+                    (key,),
+                )
+                return await cursor.fetchone()
+
+        row = await self._retry_async(_op, is_write=False)
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
             return None
 
@@ -295,6 +347,11 @@ class CacheStore:
     def nav_history_key(isin: str, years: int) -> str:
         """Key para el historial de NAV."""
         return f"nav_history:{isin}:{years}y"
+
+    @staticmethod
+    def nav_history_sources_key(isin: str, years: int) -> str:
+        """Key para los metadatos de proveedores del historial NAV."""
+        return f"nav_history_sources:{isin}:{years}y"
 
     @staticmethod
     def fund_info_key(isin: str) -> str:

@@ -228,6 +228,43 @@ def test_monthly_last_value_matches_positions(portfolio_client):
     )
 
 
+def test_per_fund_sum_matches_total_evolution(portfolio_client):
+    """La suma de Evolución por Fondo en la última fecha DEBE coincidir con la Evolución Total.
+
+    Este test detecta la discrepancia reportada: el total es correcto (pinned a live),
+    pero la suma de los fondos individuales difería porque no se aplicaba pinning
+    individual a cada fondo.
+    """
+    from app.services.portfolio_service import build_real_portfolio_history
+
+    history = build_real_portfolio_history(years=20)
+    series = history.get("series", [])
+    funds = history.get("funds", {})
+
+    assert series, "Evolución Real sin datos de serie."
+    assert funds, "Sin datos de evolución por fondo."
+
+    # Total evolution last value
+    total_last = series[-1]["value"]
+    total_last_date = series[-1]["date"]
+
+    # Sum of per-fund values at the same date
+    sum_funds_at_last = 0.0
+    for fund_name, fund_pts in funds.items():
+        # Find the point closest to / matching the total last date
+        for pt in reversed(fund_pts):
+            if pt["date"] == total_last_date:
+                sum_funds_at_last += pt["value"]
+                break
+
+    diff_pct = abs(sum_funds_at_last - total_last) / total_last * 100 if total_last > 0 else 0.0
+    assert diff_pct <= TOLERANCE_PCT, (
+        f"Suma de fondos individuales ({sum_funds_at_last:,.2f}€) "
+        f"!= Evolución Total ({total_last:,.2f}€) en {total_last_date}. "
+        f"Diferencia: {diff_pct:.2f}% (max: {TOLERANCE_PCT}%)."
+    )
+
+
 def test_general_tab_total_consistency(portfolio_client):
     """El total de Valor_Actual en pestaña General debe coincidir con la Evolución Real y la Comparativa.
 

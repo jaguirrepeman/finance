@@ -5,7 +5,7 @@ Adapter sobre PortfolioClient (async core).
 Conecta las clases modernas con los endpoints REST.
 
 Funciones principales:
-  - get_portfolio_client() → singleton PortfolioClient v2
+  - get_portfolio_client() → singleton PortfolioClient
   - build_summary() → dict compatible con AnalysisResponse
   - build_details() → dict compatible con /details
   - build_history_batch() → dict compatible con /history_batch
@@ -16,6 +16,7 @@ Funciones principales:
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -148,11 +149,70 @@ def get_canonical_isin(isin: str) -> str:
 # Singleton
 # ---------------------------------------------------------------------------
 
+# Correcciones de signo que antes estaban hardcodeadas en core_portfolio.py.
+# participaciones=0.0 → negar todos los positivos en esa fecha (ver apply_sign_overrides).
+_DEFAULT_OVERRIDES = [
+    {
+        "isin": "IE00BYX5MX67",
+        "fecha": "2026-02-24",
+        "participaciones": 0.0,
+        "notes": "Traspaso saliente",
+    },
+    {
+        "isin": "FR0000989626",
+        "fecha": "2025-09-14",
+        "participaciones": 0.0,
+        "notes": "Traspaso saliente",
+    },
+    {
+        "isin": "LU1694789451",
+        "fecha": "2026-05-07",
+        "participaciones": 0.0,
+        "notes": "Traspaso saliente",
+    },
+]
+
+
+def _seed_default_overrides() -> None:
+    """Inserta las correcciones de signo por defecto en SQLite si no existen.
+
+    Además, normaliza la nota de los overrides existentes que tengan notas
+    antiguas con "migrado desde hardcode" para que aparezcan como "Traspaso saliente".
+    """
+    try:
+        from .persistence_service import get_persistence_service as _get_ps
+        svc = _get_ps()
+        existing = {(r["isin"], r["fecha"]): r for r in svc.list_transaction_overrides()}
+        for ov in _DEFAULT_OVERRIDES:
+            key = (ov["isin"], ov["fecha"])
+            if key not in existing:
+                svc.upsert_transaction_override(
+                    isin=ov["isin"],
+                    fecha=ov["fecha"],
+                    participaciones=ov["participaciones"],
+                    notes=ov["notes"],
+                )
+                logger.info("Override por defecto sembrado: %s %s", ov["isin"], ov["fecha"])
+            else:
+                # Normalize old "migrado" notes to canonical "Traspaso saliente"
+                existing_notes = existing[key].get("notes", "") or ""
+                if "migrado" in existing_notes.lower() or existing_notes != ov["notes"]:
+                    svc.upsert_transaction_override(
+                        isin=ov["isin"],
+                        fecha=ov["fecha"],
+                        participaciones=ov["participaciones"],
+                        notes=ov["notes"],
+                    )
+                    logger.info("Override nota normalizada: %s %s → %s", ov["isin"], ov["fecha"], ov["notes"])
+    except Exception as _e:
+        logger.warning("No se pudieron sembrar los overrides por defecto: %s", _e)
+
+
 _client_instance = None
 
 
 def get_portfolio_client(force_refresh: bool = False):
-    """Devuelve un PortfolioClient v2 singleton."""
+    """Devuelve un PortfolioClient singleton."""
     global _client_instance
     if _client_instance is None or force_refresh:
         from ..client import PortfolioClient
@@ -165,7 +225,7 @@ def get_portfolio_client(force_refresh: bool = False):
             force_refresh=force_refresh,
         )
         logger.info(
-            "PortfolioClient v2 initialized from '%s' with %d positions",
+            "PortfolioClient initialized from '%s' with %d positions",
             source,
             len(_client_instance.portfolio.positions),
         )
@@ -173,11 +233,35 @@ def get_portfolio_client(force_refresh: bool = False):
         # Cargar órdenes adicionales de ETFs (MyInvestor + TradeRepublic)
         _load_etf_sources(_client_instance)
 
+        # Sembrar correcciones por defecto (solo si no existen ya en DB)
+        _seed_default_overrides()
+
+        # Aplicar exclusiones de movimientos desde SQLite
+        try:
+            from .persistence_service import get_persistence_service as _get_ps
+            _excluded = _get_ps().list_excluded_movements()
+            if _excluded:
+                _client_instance.portfolio.filter_excluded_movements(_excluded)
+                logger.info("Filtrados %d excluded_movements de SQLite", len(_excluded))
+        except Exception as _ex_err:
+            logger.warning("No se pudieron filtrar excluded_movements: %s", _ex_err)
+
+        # Aplicar overrides de transacciones desde SQLite (corrección de signos)
+        try:
+            from .persistence_service import get_persistence_service as _get_ps
+            _overrides = _get_ps().list_transaction_overrides()
+            if _overrides:
+                _client_instance.portfolio.apply_sign_overrides(_overrides)
+                logger.info("Aplicados %d transaction_overrides de SQLite", len(_overrides))
+        except Exception as _ov_err:
+            logger.warning("No se pudieron aplicar transaction_overrides: %s", _ov_err)
+
         logger.info(
             "Portfolio final con ETFs: %d posiciones",
             len(_client_instance.portfolio.positions),
         )
     return _client_instance
+
 
 
 def reset_client(force_refresh: bool = False):
@@ -213,7 +297,7 @@ def load_json(filename: str, default=None):
 
 
 # ---------------------------------------------------------------------------
-# Builders (thin adapters sobre client v2)
+# Builders (thin adapters sobre client)
 # ---------------------------------------------------------------------------
 
 
@@ -294,6 +378,146 @@ def build_summary() -> Dict[str, Any]:
             "Ganancia_Pct": round(safe_float(ganancia_pct), 2) if pd.notna(ganancia_pct) else None,
             "finect_url": finect_url,
         })
+
+    # ── Merge manual positions (from SQLite) that are NOT already in FIFO ──
+    # Build a live-price lookup from the already-loaded positions DataFrame
+    _live_prices: Dict[str, float] = {}
+    for _, _pr in pos.iterrows():
+        _pi = str(_pr.get("ISIN", "")).strip().upper()
+        _pv = _pr.get("Precio_Actual")
+        if _pi and _pv is not None and pd.notna(_pv) and float(_pv) > 0:
+            _live_prices[_pi] = float(_pv)
+    try:
+        from .persistence_service import get_persistence_service as _get_ps
+        _TIPO_LABEL: dict[str, str] = {
+            "RV": "Renta Variable",
+            "INDEX": "Indexado",
+            "RF": "Renta Fija",
+            "CASH": "Liquidez",
+            "ALTERNATIVO": "Alternativo",
+        }
+        _manual = _get_ps().list_manual_positions()
+        _existing_isins = {f["ISIN"] for f in funds_list}
+
+        # Aggregate multiple entries per ISIN into a single virtual position
+        _manual_by_isin: Dict[str, dict] = {}
+        for mp in _manual:
+            mp_isin = (mp.get("isin") or "").strip().upper()
+            if not mp_isin:
+                continue
+            if mp_isin not in _manual_by_isin:
+                _manual_by_isin[mp_isin] = {
+                    "isin": mp_isin,
+                    "name": mp.get("name") or mp_isin,
+                    "tipo": (mp.get("tipo") or "RV").upper(),
+                    "capital_invertido": 0.0,
+                    "participaciones": None,
+                    "fecha_compra": mp.get("fecha_compra"),
+                }
+            agg = _manual_by_isin[mp_isin]
+            agg["capital_invertido"] += float(mp.get("capital_invertido") or 0)
+            mp_partic = mp.get("participaciones")
+            if mp_partic is not None:
+                agg["participaciones"] = (agg["participaciones"] or 0.0) + float(mp_partic)
+
+        for mp_isin, mp in _manual_by_isin.items():
+            existing_entry = next((f for f in funds_list if f["ISIN"] == mp_isin), None)
+            mp_cap = float(mp.get("capital_invertido") or 0)   # sum of manual deposits (neg = sales)
+            mp_partic = mp.get("participaciones")               # sum of manual participaciones (neg = sales)
+
+            # Resolve live NAV (need it regardless of whether entry exists)
+            _live_price = _live_prices.get(mp_isin)
+            if _live_price is None:
+                try:
+                    _nav_df = client.fund_nav_history(mp_isin, years=1)
+                    if _nav_df is not None and not _nav_df.empty:
+                        import pandas as _pd2
+                        _nav_df["date"] = _pd2.to_datetime(_nav_df["date"])
+                        _latest_price = float(_nav_df.sort_values("date").iloc[-1]["price"])
+                        if _latest_price > 0:
+                            _live_price = _latest_price
+                except Exception:
+                    pass
+
+            # Current value of the manual portion
+            mp_valor: float = 0.0
+            if mp_partic is not None and _live_price and _live_price > 0:
+                mp_valor = round(float(mp_partic) * _live_price, 2)
+            if mp_valor == 0.0:
+                mp_valor = mp_cap  # fallback when no NAV available
+
+            if existing_entry is not None:
+                # ── FIFO entry exists: ADD manual contribution on top ──────
+                fifo_valor = safe_float(existing_entry.get("Valor_Actual", 0))
+                fifo_cap   = safe_float(existing_entry.get("Capital_Invertido", 0))
+                fifo_partic = safe_float(existing_entry.get("Participaciones", 0))
+
+                new_valor  = round(fifo_valor + mp_valor, 2)
+                new_cap    = round(fifo_cap   + mp_cap,   2)
+                new_partic = round(fifo_partic + float(mp_partic or 0), 6)
+                new_ganancia = round(new_valor - new_cap, 2)
+                new_ganancia_pct = (new_ganancia / new_cap * 100) if new_cap > 0 else 0
+
+                existing_entry["Valor_Actual"]     = new_valor
+                existing_entry["Capital_Invertido"] = new_cap
+                existing_entry["Participaciones"]   = new_partic
+                existing_entry["Ganancia_Abs"]      = new_ganancia
+                existing_entry["Ganancia_Pct"]      = round(new_ganancia_pct, 2)
+                existing_entry["YTD (%)"]           = f"{new_ganancia_pct:+.1f}%"
+                existing_entry["has_manual"]        = True
+                # Recompute all weights
+                total_val_new = sum(safe_float(f.get("Valor_Actual", 0)) for f in funds_list)
+                for f in funds_list:
+                    f["Porcentaje"] = round(
+                        safe_float(f.get("Valor_Actual", 0)) / total_val_new * 100
+                        if total_val_new > 0 else 0, 2
+                    )
+            else:
+                # ── New fund not in FIFO: create entry ───────────────────
+                mp_tipo = mp.get("tipo", "RV").upper()
+                mp_label = _TIPO_LABEL.get(mp_tipo, mp_tipo)
+                mp_ganancia = mp_valor - mp_cap
+                mp_ganancia_pct = (mp_ganancia / mp_cap * 100) if mp_cap > 0 else 0
+
+                total_val_with_manual = total_val + mp_valor
+                mp_peso = (mp_valor / total_val_with_manual * 100) if total_val_with_manual > 0 else 0
+                if total_val_with_manual > 0:
+                    factor = total_val / total_val_with_manual
+                    for f in funds_list:
+                        f["Porcentaje"] = round(f["Porcentaje"] * factor, 2)
+                total_val = total_val_with_manual
+                if mp_tipo == "RF":
+                    total_rf += mp_peso
+                elif mp_tipo == "CASH":
+                    total_cash += mp_peso
+                elif mp_tipo == "ALTERNATIVO":
+                    total_alt += mp_peso
+                else:
+                    total_rv += mp_peso
+                details[mp_label] = details.get(mp_label, 0) + mp_peso
+                fund_entry: dict[str, Any] = {
+                    "Fondo": mp.get("name") or mp_isin,
+                    "TIPO": mp_tipo,
+                    "Porcentaje": round(mp_peso, 2),
+                    "ISIN": mp_isin,
+                    "NAV (Precio)": "---",
+                    "YTD (%)": f"{mp_ganancia_pct:+.1f}%",
+                    "Estrellas MS": "---",
+                    "Categoría": mp_label,
+                    "IsIndex": mp_tipo == "INDEX",
+                    "Valor_Actual": round(mp_valor, 2),
+                    "Capital_Invertido": round(mp_cap, 2),
+                    "Ganancia_Abs": round(mp_ganancia, 2),
+                    "Ganancia_Pct": round(mp_ganancia_pct, 2),
+                    "finect_url": None,
+                    "is_manual": True,
+                }
+                if mp_partic is not None:
+                    fund_entry["Participaciones"] = float(mp_partic)
+                funds_list.append(fund_entry)
+                _existing_isins.add(mp_isin)
+    except Exception as _mp_err:
+        logger.warning("Error merging manual_positions into summary: %s", _mp_err)
 
     total_indexed = sum(f["Porcentaje"] for f in funds_list if f["IsIndex"])
     total_active = sum(f["Porcentaje"] for f in funds_list if not f["IsIndex"])
@@ -409,6 +633,51 @@ def build_history_batch() -> Dict[str, Any]:
         ]
         fund_series[col] = series.set_index(date_col)[col]
 
+    # ── Incluir fondos manuales cuyo ISIN no tiene NAV en el batch ──────────
+    try:
+        from .persistence_service import get_persistence_service as _get_ps_hb
+        _manual_list = _get_ps_hb().list_manual_positions()
+        # Build a set of ISINs already covered (resolved from pos DataFrame)
+        _covered_isins: set = set()
+        for _, _r in pos.iterrows():
+            _covered_isins.add(str(_r.get("ISIN", "")).strip().upper())
+        for _mp in _manual_list:
+            _mp_isin = ((_mp.get("isin") or "")).strip().upper()
+            _mp_name = _mp.get("name") or _mp_isin
+            if not _mp_isin or _mp_isin in _covered_isins:
+                continue
+            try:
+                _nav_df = client.fund_nav_history(_mp_isin, years=10)
+                if _nav_df is not None and not _nav_df.empty:
+                    # Normalise: either {date,price} columns or date-index
+                    if "date" in _nav_df.columns and "price" in _nav_df.columns:
+                        _series_data = [
+                            {"date": str(row["date"])[:10], "price": safe_float(row["price"])}
+                            for _, row in _nav_df.iterrows()
+                            if row["price"] is not None
+                        ]
+                    else:
+                        _series_data = [
+                            {"date": str(idx)[:10], "price": safe_float(val)}
+                            for idx, val in _nav_df.squeeze().items()
+                            if val is not None
+                        ]
+                    if _series_data:
+                        result[_mp_name] = _series_data
+                        # Also expose as a Series for the portfolio-line computation
+                        _tmp = pd.Series(
+                            {r["date"]: r["price"] for r in _series_data},
+                            name=_mp_name,
+                        )
+                        _tmp.index = pd.to_datetime(_tmp.index)
+                        fund_series[_mp_name] = _tmp
+                        _covered_isins.add(_mp_isin)
+                        logger.info("build_history_batch: added manual fund %s (%s)", _mp_name, _mp_isin)
+            except Exception as _mp_err:
+                logger.warning("build_history_batch: error fetching NAV for manual %s: %s", _mp_isin, _mp_err)
+    except Exception as _mp_outer_err:
+        logger.warning("build_history_batch: error loading manual positions: %s", _mp_outer_err)
+
     # Serie "Mi Cartera Actual"
     if len(fund_series) >= 2:
         try:
@@ -445,7 +714,7 @@ def build_history_batch() -> Dict[str, Any]:
     return result
 
 
-def build_real_portfolio_history(years: int = 20) -> Dict[str, Any]:
+def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     """Evolución real del portfolio basada en órdenes: participaciones × NAV por día.
 
     A diferencia de ``build_history_batch`` (que usa pesos actuales sobre toda la historia),
@@ -660,8 +929,9 @@ def build_real_portfolio_history(years: int = 20) -> Dict[str, Any]:
             if nav_src is None:
                 # If we have a live NAV and current holding, inject a synthetic
                 # single-point series so the fund appears in the final date.
-                if raw_isin in live_navs and last_date is not None:
-                    synthetic_nav = pd.Series(live_navs[raw_isin], index=[last_date])
+                _syn_price = live_navs.get(raw_isin) or live_navs.get(canonical)
+                if _syn_price and last_date is not None:
+                    synthetic_nav = pd.Series(_syn_price, index=[last_date])
                     nav_src = synthetic_nav
                 else:
                     continue
@@ -688,15 +958,83 @@ def build_real_portfolio_history(years: int = 20) -> Dict[str, Any]:
     # Pin the last date's values to match "Mi Cartera Base" exactly.
     # 1) Total Valor_Actual from positions (live) replaces the last evolution point.
     # 2) Total Capital_Invertido from positions replaces the last invested point.
+    # 3) Per-fund values are also pinned so their sum equals the total.
     # This eliminates NAV-lag drift and includes funds with no NAV history
     # (e.g. ES0141116030 which has no Finect/YF price history).
     try:
-        _live_val_total = float(df_live["Valor_Actual"].dropna().sum())
         _live_inv_total = float(df_live["Capital_Invertido"].dropna().sum())
-        if _live_val_total > 0 and last_date is not None and last_date in portfolio_value.index:
-            portfolio_value.loc[last_date] = _live_val_total
         if _live_inv_total > 0 and last_date is not None and last_date in total_invested.index:
             total_invested.loc[last_date] = _live_inv_total
+
+        # ── Pin per-fund at last_date to live Valor_Actual / Capital_Invertido ──
+        # Build a mapping: canonical ISIN → SUM(Valor_Actual), SUM(Capital_Invertido)
+        # IMPORTANT: df_live may have multiple rows for ISINs that map to the
+        # same canonical (e.g. different share classes in the same FUND_GROUP).
+        # We must aggregate by canonical so the per-fund pin matches the total.
+        _live_val_per_canonical: Dict[str, float] = {}
+        _live_inv_per_canonical: Dict[str, float] = {}
+        for _, _lr in df_live.iterrows():
+            _li = str(_lr["ISIN"])
+            _canonical_li = get_canonical_isin(_li)
+            _lv = _lr.get("Valor_Actual")
+            _lc = _lr.get("Capital_Invertido")
+            if _lv is not None and pd.notna(_lv):
+                _live_val_per_canonical[_canonical_li] = (
+                    _live_val_per_canonical.get(_canonical_li, 0.0) + float(_lv)
+                )
+            if _lc is not None and pd.notna(_lc):
+                _live_inv_per_canonical[_canonical_li] = (
+                    _live_inv_per_canonical.get(_canonical_li, 0.0) + float(_lc)
+                )
+
+        # Map canonical → fund_name (reverse of isin_name_map)
+        _can_to_name: Dict[str, str] = {
+            c: isin_name_map.get(c, c) for c in canonical_isins
+        }
+
+        for _ci, _fn in _can_to_name.items():
+            # Pin fund value
+            if (
+                _fn in fund_value_series
+                and last_date is not None
+                and _ci in _live_val_per_canonical
+                and last_date in fund_value_series[_fn].index
+            ):
+                fund_value_series[_fn].loc[last_date] = _live_val_per_canonical[_ci]
+            # Pin fund invested
+            if (
+                _fn in fund_inv_series
+                and last_date is not None
+                and _ci in _live_inv_per_canonical
+                and last_date in fund_inv_series[_fn].index
+            ):
+                fund_inv_series[_fn].loc[last_date] = _live_inv_per_canonical[_ci]
+
+        # Handle funds in df_live that have no entry in fund_value_series
+        # (e.g. no NAV history at all → they were skipped entirely)
+        for _ci, _fn in _can_to_name.items():
+            if _fn not in fund_value_series and _ci in _live_val_per_canonical and last_date is not None:
+                _syn = pd.Series(0.0, index=all_dates)
+                _syn.loc[last_date] = _live_val_per_canonical[_ci]
+                fund_value_series[_fn] = _syn
+                if _ci in _live_inv_per_canonical:
+                    _isyn = pd.Series(0.0, index=all_dates)
+                    _isyn.loc[last_date] = _live_inv_per_canonical[_ci]
+                    fund_inv_series[_fn] = _isyn
+
+        # ── Recompute portfolio totals from per-fund series ──────────────────
+        # This guarantees that the total evolution chart is ALWAYS the exact sum
+        # of the individual per-fund charts — no independent overrides that could
+        # create a jump/divergence on the last date.
+        if fund_value_series:
+            _pv_new = pd.concat(list(fund_value_series.values()), axis=1).fillna(0).sum(axis=1)
+            _pv_new = _pv_new.reindex(all_dates, fill_value=0.0)
+            _pv_mask = _pv_new > 0
+            portfolio_value = _pv_new[_pv_mask]
+        if fund_inv_series:
+            _ti_new = pd.concat(list(fund_inv_series.values()), axis=1).fillna(0).sum(axis=1)
+            total_invested = _ti_new.reindex(portfolio_value.index, fill_value=0.0)
+
     except Exception as _pin_err:
         logger.warning("Could not pin last evolution date to live positions: %s", _pin_err)
 
@@ -781,7 +1119,7 @@ def build_real_portfolio_history(years: int = 20) -> Dict[str, Any]:
     }
 
 
-def build_real_portfolio_history_per_fund(years: int = 20) -> Dict[str, Any]:
+def build_real_portfolio_history_per_fund(years: int = 30) -> Dict[str, Any]:
     """Evolución real desglosada por fondo: valor diario = participaciones × NAV.
 
     Delega completamente en ``build_real_portfolio_history`` para garantizar que:
@@ -904,7 +1242,7 @@ def run_analytics_pipeline(force_download: bool = False):
         logger.info("Analytics Pipeline ya en ejecucion — omitiendo llamada duplicada")
         return
     try:
-        logger.info("=== Analytics Pipeline v2 START (force=%s) ===", force_download)
+        logger.info("=== Analytics Pipeline START (force=%s) ===", force_download)
         start = time.time()
 
         if force_download:
@@ -916,7 +1254,9 @@ def run_analytics_pipeline(force_download: bool = False):
         except Exception as e:
             logger.error("Error building summary: %s", e)
         try:
-            summary["real_evolution"] = build_real_portfolio_history()
+            real_evo = build_real_portfolio_history()
+            summary["real_evolution"] = real_evo
+            _save_json("real_evolution.json", real_evo)
         except Exception as e:
             logger.error("Error building real_evolution: %s", e)
         if summary:
@@ -941,7 +1281,7 @@ def run_analytics_pipeline(force_download: bool = False):
             logger.error("Error building correlation: %s", e)
 
         elapsed = time.time() - start
-        logger.info("=== Analytics Pipeline v2 DONE in %.1fs ===", elapsed)
+        logger.info("=== Analytics Pipeline DONE in %.1fs ===", elapsed)
     finally:
         _pipeline_lock.release()
 
@@ -952,7 +1292,7 @@ def run_nav_pipeline(force_download: bool = False):
         logger.info("NAV Pipeline ya en ejecucion — omitiendo llamada duplicada")
         return
     try:
-        logger.info("=== NAV Pipeline v2 START (force=%s) ===", force_download)
+        logger.info("=== NAV Pipeline START (force=%s) ===", force_download)
         start = time.time()
         if force_download:
             reset_client(force_refresh=True)
@@ -962,7 +1302,9 @@ def run_nav_pipeline(force_download: bool = False):
         except Exception as e:
             logger.error("Error building summary: %s", e)
         try:
-            summary_data["real_evolution"] = build_real_portfolio_history()
+            real_evo = build_real_portfolio_history()
+            summary_data["real_evolution"] = real_evo
+            _save_json("real_evolution.json", real_evo)
         except Exception as e:
             logger.error("Error building real_evolution: %s", e)
         if summary_data:
@@ -975,7 +1317,7 @@ def run_nav_pipeline(force_download: bool = False):
             _save_json("correlation.json", build_correlation())
         except Exception as e:
             logger.error("Error building correlation: %s", e)
-        logger.info("=== NAV Pipeline v2 DONE in %.1fs ===", time.time() - start)
+        logger.info("=== NAV Pipeline DONE in %.1fs ===", time.time() - start)
     finally:
         _pipeline_lock.release()
 
@@ -986,7 +1328,7 @@ def run_details_pipeline(force_download: bool = False):
         logger.info("Details Pipeline ya en ejecucion — omitiendo llamada duplicada")
         return
     try:
-        logger.info("=== Details Pipeline v2 START (force=%s) ===", force_download)
+        logger.info("=== Details Pipeline START (force=%s) ===", force_download)
         start = time.time()
         if force_download:
             reset_client(force_refresh=True)
@@ -994,7 +1336,7 @@ def run_details_pipeline(force_download: bool = False):
             _save_json("details.json", build_details())
         except Exception as e:
             logger.error("Error building details: %s", e)
-        logger.info("=== Details Pipeline v2 DONE in %.1fs ===", time.time() - start)
+        logger.info("=== Details Pipeline DONE in %.1fs ===", time.time() - start)
     finally:
         _pipeline_lock.release()
 
@@ -1156,6 +1498,111 @@ def build_msci_world_benchmark() -> Dict[str, Any]:
 # Búsqueda de fondos en Finect
 # ---------------------------------------------------------------------------
 
+# Registro estático de ETFs conocidos (ticker → ISIN + metadatos).
+# Incluye ETFs de energía nuclear disponibles en MyInvestor/Trade Republic.
+_KNOWN_ETF_TICKERS: Dict[str, Dict[str, str]] = {
+    "NUKL": {
+        "isin": "IE000M7V94E1",
+        "name": "VanEck Uranium and Nuclear Technologies UCITS ETF",
+        "ticker": "NUKL",
+    },
+    "NUCL": {
+        "isin": "IE000BMZP0I6",
+        "name": "iShares Nuclear Energy and Uranium Mining UCITS ETF",
+        "ticker": "NUCL",
+    },
+    "NCLR": {
+        "isin": "IE0003BJ2JS4",
+        "name": "WisdomTree Uranium and Nuclear Energy UCITS ETF (NCLR)",
+        "ticker": "NCLR",
+    },
+    "NUCG": {
+        "isin": "IE000M7V94E1",
+        "name": "VanEck Uranium and Nuclear Technologies UCITS ETF (NUCG)",
+        "ticker": "NUCG",
+    },
+    "WNUC": {
+        "isin": "IE0003BJ2JS4",
+        "name": "WisdomTree Uranium and Nuclear Energy UCITS ETF (WNUC)",
+        "ticker": "WNUC",
+    },
+}
+
+_TICKER_RE = re.compile(r"^[A-Z]{2,6}$")
+
+# In-memory cache for search results (query → (timestamp, results))
+_search_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+_SEARCH_CACHE_TTL = 120  # 2 minutes
+
+
+async def _search_etf_by_ticker(query: str) -> List[Dict[str, Any]]:
+    """Busca ETFs por ticker usando el autocomplete de Yahoo Finance.
+
+    Devuelve resultados con al menos ``isin`` (si disponible via yfinance),
+    ``name`` y ``ticker``.  Nunca lanza excepciones — devuelve lista vacía
+    en caso de error.
+    """
+    results: List[Dict[str, Any]] = []
+    query_upper = query.upper().strip()
+
+    # --- 1. Registro estático ---
+    for tk, meta in _KNOWN_ETF_TICKERS.items():
+        if query_upper in tk or tk in query_upper:
+            results.append({
+                "isin": meta["isin"],
+                "name": meta["name"],
+                "ticker": tk,
+                "in_portfolio": False,
+                "url": f"https://www.finect.com/etfs/{meta['isin']}",
+            })
+
+    # --- 2. Yahoo Finance autocomplete ---
+    try:
+        from .http_client import get_http_client
+
+        yfin_url = (
+            "https://query2.finance.yahoo.com/v1/finance/search"
+            f"?q={query}&lang=en-US&region=ES&quotesCount=10&newsCount=0"
+        )
+        async with get_http_client() as client:
+            resp = await client.get(yfin_url, timeout=5)
+            if resp.status_code == 200:
+                quotes = resp.json().get("quotes", [])
+                seen_isins = {r["isin"] for r in results}
+                for q in quotes:
+                    if q.get("quoteType") not in ("ETF", "MUTUALFUND"):
+                        continue
+                    symbol: str = q.get("symbol", "")
+                    name: str = q.get("longname") or q.get("shortname") or symbol
+                    # Try yfinance for ISIN (run in thread to avoid blocking)
+                    isin = ""
+                    try:
+                        import yfinance as yf
+
+                        def _get_isin(s: str) -> str:
+                            return yf.Ticker(s).isin or ""
+
+                        raw_isin = await asyncio.to_thread(_get_isin, symbol)
+                        isin = raw_isin if raw_isin and raw_isin != "-" else ""
+                    except Exception:
+                        pass
+                    entry: Dict[str, Any] = {
+                        "isin": isin or symbol,  # fallback: use ticker symbol as key
+                        "name": name,
+                        "ticker": symbol,
+                        "in_portfolio": False,
+                    }
+                    if isin and isin not in seen_isins:
+                        seen_isins.add(isin)
+                        results.append(entry)
+                    elif not isin and symbol not in seen_isins:
+                        seen_isins.add(symbol)
+                        results.append(entry)
+    except Exception as exc:
+        logger.debug("_search_etf_by_ticker Yahoo fallback failed: %s", exc)
+
+    return results
+
 
 def search_funds(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Busca fondos en el índice de sitemaps de Finect (por ISIN o nombre)."""
@@ -1164,6 +1611,12 @@ def search_funds(query: str, limit: int = 20) -> List[Dict[str, Any]]:
 
 async def search_funds_async(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Versión async de search_funds: busca en el sitemap de Finect + portfolio local."""
+    # Check in-memory cache first
+    cache_key = f"{query.lower().strip()}:{limit}"
+    cached = _search_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _SEARCH_CACHE_TTL:
+        return cached[1]
+
     client = get_portfolio_client()
     portfolio_isins: set = set(client.portfolio.positions.keys())
     query_lower = query.lower().strip()
@@ -1171,12 +1624,12 @@ async def search_funds_async(query: str, limit: int = 20) -> List[Dict[str, Any]
     # --- Fallback: fondos del portfolio que coinciden ---
     portfolio_matches: List[Dict[str, Any]] = []
     history_cache = load_json("history_batch.json") or {}
+    details_cache = load_json("details.json") or {}
     for isin in portfolio_isins:
         name = history_cache.get(isin, {}) if isinstance(history_cache.get(isin), dict) else isin
         if isinstance(history_cache.get(isin), list):
             name = isin  # history_batch stores lists of {date,price}
         # Try to get name from details cache
-        details_cache = load_json("details.json") or {}
         for fund_name, fund_data in details_cache.items():
             if isinstance(fund_data, dict) and fund_data.get("isin") == isin:
                 name = fund_name
@@ -1219,4 +1672,21 @@ async def search_funds_async(query: str, limit: int = 20) -> List[Dict[str, Any]
     extra_portfolio = [m for m in portfolio_matches if m["isin"] not in sitemap_isins]
 
     combined = exact_matches + extra_portfolio + results
-    return combined[:limit]
+
+    # --- Búsqueda por ticker (cuando la query parece un ticker de bolsa) ---
+    ticker_matches: List[Dict[str, Any]] = []
+    if _TICKER_RE.match(query.strip().upper()):
+        ticker_matches = await _search_etf_by_ticker(query.strip())
+        # Evitar duplicados con los resultados ya encontrados
+        combined_isins = {e["isin"] for e in combined}
+        ticker_matches = [m for m in ticker_matches if m["isin"] not in combined_isins]
+
+    # Tickers primero si la query parece un ticker exacto, si no, al final
+    if _TICKER_RE.match(query.strip().upper()):
+        combined = ticker_matches + combined
+    else:
+        combined = combined + ticker_matches
+
+    final = combined[:limit]
+    _search_cache[cache_key] = (time.time(), final)
+    return final

@@ -113,8 +113,11 @@ This project follows a **thin-notebook / thick-backend** pattern:
    `services/` → `client.py` → `endpoints.py` → `notebook` (visualización).
 
 7. **Actualización del dashboard**
-   Cada vez que toques components.js, actualizas el jsx.
+   <!-- Cada vez que toques components.js, actualizas el jsx. -->
+   Cada vez que toques los componentes del frontend, haz un rebuild con npm.cmd run build
 
 8. **Consistencia entre notebooks y endpoints**
    Si añades un nuevo endpoint, haz un ejemplo en el notebook. Si añades una nueva métrica, hazla visible en el notebook. El notebook es la demo de tu API, no lo dejes obsoleto.
 
+9. **English teacher**
+   Corrige la ortografía y gramática de mis inputs en el chat, y si algo no está claro, haz preguntas de aclaración antes de escribir código. Quiero acostumbrarme a escribir bien. 

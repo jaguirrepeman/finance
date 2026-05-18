@@ -134,6 +134,8 @@ class Portfolio:
             raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
         df = pd.read_excel(filepath)
         self._process_orders_df(df)
+        if not self.movements.empty:
+            self.movements["Fuente"] = "MyInvestor Fondos"
 
     def _load_from_broker_csv(self, filepath: str) -> None:
         """Lee el CSV de órdenes del broker (separador ';') y delega a _process_orders_df.
@@ -169,6 +171,8 @@ class Portfolio:
             raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
         df = pd.read_csv(filepath, sep="\t", encoding="utf-8", dtype=str)
         self._process_orders_df(df)
+        if not self.movements.empty:
+            self.movements["Fuente"] = "MyInvestor Fondos"
 
     def _process_orders_df(self, df: pd.DataFrame) -> None:
         """Normaliza, limpia y aplica reglas de negocio sobre un DataFrame de órdenes.
@@ -198,33 +202,8 @@ class Portfolio:
         df_isin = df["ISIN"].astype(str).str.strip().str.upper()
         df["ISIN"] = df_isin
 
-        # Regla: Reembolsos específicos que deben tener signo negativo
-        # (El archivo no tiene columna Tipo; se identifican manualmente)
-        is_ie00 = df_isin == "IE00BYX5MX67"
-        is_feb24_2026 = (df["Fecha"] == "2026-02-24")
-
-        # IE00BYX5MX67 — reembolso de ~70.082 participaciones
-        mask1 = is_ie00 & is_feb24_2026 & (
-            ((df["Participaciones"].abs() - 70.082).abs() < 0.5)
-            # | ((df["Participaciones"].abs() - 70082).abs() < 50)
-        )
-        df.loc[mask1, "Participaciones"] = -df.loc[mask1, "Participaciones"].abs()
-
-        # IE00BYX5MX67 — reembolso de ~140.164 participaciones
-        mask2 = is_ie00 & is_feb24_2026 & (
-            ((df["Participaciones"].abs() - 140.164).abs() < 0.5)
-            | ((df["Participaciones"].abs() - 140164).abs() < 50)
-        )
-        df.loc[mask2, "Participaciones"] = -df.loc[mask2, "Participaciones"].abs()
-
-        # FR0000989626 — reembolso del 14/09/2025
-        mask3 = (
-            (df_isin == "FR0000989626")
-            & (df["Fecha"].dt.year == 2025)
-            & (df["Fecha"].dt.month == 9)
-            & (df["Fecha"].dt.day == 14)
-        )
-        df.loc[mask3, "Participaciones"] = -df.loc[mask3, "Participaciones"].abs()
+        # Los reembolsos/traspasos se corrigen vía transaction_overrides en SQLite
+        # (gestionados desde la UI → ya no hay reglas hardcodeadas aquí).
 
         df = df.sort_values("Fecha").reset_index(drop=True)
         self.movements = df.copy()
@@ -234,6 +213,100 @@ class Portfolio:
             if isin_str in ("nan", ""):
                 continue
             self._apply_fifo(isin_str, group)
+
+    def filter_excluded_movements(self, excluded: list[dict]) -> None:
+        """Elimina movimientos excluidos por el usuario y recalcula FIFO.
+
+        Args:
+            excluded: lista de dicts con {isin, fecha (YYYY-MM-DD)}.
+        """
+        if not excluded or self.movements.empty:
+            return
+        excluded_set = {
+            (str(e["isin"]).strip().upper(), str(e["fecha"]).strip()[:10])
+            for e in excluded
+        }
+        before = len(self.movements)
+        mask = self.movements.apply(
+            lambda row: (
+                str(row["ISIN"]).strip().upper(),
+                row["Fecha"].strftime("%Y-%m-%d") if hasattr(row["Fecha"], "strftime") else str(row["Fecha"])[:10],
+            ) not in excluded_set,
+            axis=1,
+        )
+        self.movements = self.movements.loc[mask].reset_index(drop=True)
+        removed = before - len(self.movements)
+        if removed:
+            logger.info("Filtered out %d excluded movements", removed)
+            # Recalculate FIFO from scratch
+            self.open_lots = []
+            self.positions = {}
+            df_sorted = self.movements.sort_values("Fecha")
+            for isin, group in df_sorted.groupby("ISIN"):
+                isin_str = str(isin).strip()
+                if isin_str in ("nan", ""):
+                    continue
+                self._apply_fifo(isin_str, group)
+
+    def apply_sign_overrides(self, overrides: List[Dict]) -> None:
+        """Aplica overrides de signos desde SQLite y recalcula FIFO.
+
+        Llamado después de la carga inicial para aplicar correcciones
+        de signo que el usuario ha guardado desde la interfaz web.
+
+        Semántica del campo ``participaciones``:
+          - Valor != 0 → reemplaza directamente el valor de la fila coincidente.
+          - Valor == 0 → modo "negar todos los positivos": convierte en negativas
+            todas las filas positivas que coinciden con ISIN+fecha.  Útil cuando
+            hay varias transacciones el mismo día (ej. dos reembolsos) y no se
+            puede almacenar dos overrides para la misma clave ISIN+fecha.
+
+        Args:
+            overrides: lista de dicts con {isin, fecha (YYYY-MM-DD), participaciones}.
+        """
+        if not overrides or self.movements.empty:
+            return
+        modified = False
+        for ov in overrides:
+            isin_ov = str(ov.get("isin", "")).strip().upper()
+            fecha_ov = str(ov.get("fecha", "")).strip()[:10]  # YYYY-MM-DD
+            participaciones_ov = float(ov.get("participaciones", 0))
+            mask = (
+                (self.movements["ISIN"] == isin_ov)
+                & (self.movements["Fecha"].dt.strftime("%Y-%m-%d") == fecha_ov)
+            )
+            if mask.any():
+                if participaciones_ov == 0.0:
+                    # Modo "negar todos los positivos" en esta fecha
+                    pos_mask = mask & (self.movements["Participaciones"] > 0)
+                    self.movements.loc[pos_mask, "Participaciones"] = (
+                        -self.movements.loc[pos_mask, "Participaciones"].abs()
+                    )
+                    logger.info(
+                        "Override (negar positivos) aplicado: %s %s — %d filas negadas",
+                        isin_ov, fecha_ov, int(pos_mask.sum()),
+                    )
+                else:
+                    self.movements.loc[mask, "Participaciones"] = participaciones_ov
+                    logger.info(
+                        "Override aplicado: %s %s → %+.4f participaciones",
+                        isin_ov, fecha_ov, participaciones_ov,
+                    )
+                modified = True
+            else:
+                logger.warning(
+                    "Override no encontrado en movements: %s %s", isin_ov, fecha_ov
+                )
+        if modified:
+            # Recalcular FIFO desde cero con los movimientos corregidos
+            self.open_lots = []
+            self.positions = {}
+            df_sorted = self.movements.sort_values("Fecha")
+            for isin, group in df_sorted.groupby("ISIN"):
+                isin_str = str(isin).strip()
+                if isin_str in ("nan", ""):
+                    continue
+                self._apply_fifo(isin_str, group)
 
     @staticmethod
     def _fix_localization(units: float, amount: float) -> float:
@@ -353,6 +426,7 @@ class Portfolio:
         df["Estado"] = "Finalizada"
         df["Tipo"] = "Compra"
         df["Fondo"] = df["ISIN"]  # nombre desconocido; usar ISIN
+        df["Fuente"] = "MyInvestor ETFs"
 
         # Corregir años claramente incorrectos (ej. 2925 → 2025)
         df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
@@ -366,7 +440,7 @@ class Portfolio:
                 mask_bad_year.sum(),
             )
 
-        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"]]
+        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo", "Fuente"]]
 
     @staticmethod
     def _normalize_traderepublic_df(filepath: str) -> pd.DataFrame:
@@ -378,7 +452,7 @@ class Portfolio:
         df = pd.read_csv(filepath, sep=None, engine="python")
         df = df[df["category"] == "TRADING"].copy()
         if df.empty:
-            return pd.DataFrame(columns=["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"])
+            return pd.DataFrame(columns=["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo", "Fuente"])
 
         df = df.rename(columns={
             "date": "Fecha",
@@ -402,8 +476,9 @@ class Portfolio:
 
         # Usar ISIN como nombre de fondo cuando el campo está vacío o es NaN
         df["Fondo"] = df["Fondo"].where(df["Fondo"].notna() & (df["Fondo"].astype(str).str.strip() != ""), df["ISIN"])
+        df["Fuente"] = "Trade Republic ETFs"
 
-        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo"]]
+        return df[["ISIN", "Fecha", "Participaciones", "Importe", "Estado", "Tipo", "Fondo", "Fuente"]]
 
     def load_extra_orders(self, df: pd.DataFrame, etf_isins: Optional[set] = None) -> None:
         """Incorpora órdenes adicionales (ya normalizadas) a la cartera.

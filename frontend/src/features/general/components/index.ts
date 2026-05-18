@@ -1,0 +1,10 @@
+export { AllocationSection } from "./allocation-section";
+export { FundTable } from "./fund-table";
+export { KpiStrip } from "./kpi-strip";
+export { PortfolioChart } from "./portfolio-chart";
+export { MonthlyTable } from "./monthly-table";
+export { PerFundEvolutionChart } from "./per-fund-chart";
+export { OrdersSummaryChart } from "./orders-chart";
+export { MonthComparisonWidget } from "./month-comparison";
+export { AdviceCard } from "./advice-card";
+export { TransactionOverridesPanel } from "./transaction-overrides";

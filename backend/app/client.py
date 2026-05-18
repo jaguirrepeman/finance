@@ -40,14 +40,12 @@ class PortfolioClient:
         self,
         source: Union[str, List[Dict], Dict, None] = None,
         cache_path: Optional[str] = None,
-        use_cache: bool = True,
         force_refresh: bool = False,
     ) -> None:
         """
         Args:
             source: ruta a TSV/Excel/CSV, lista de dicts, dict {ISIN: units}, o None.
             cache_path: ruta para la caché SQLite. Si None, usa data/cache/.
-            use_cache: si usar cache (legacy compat, siempre True en v2).
             force_refresh: ignorar caches y forzar descarga fresca.
         """
         self.portfolio = Portfolio(source)

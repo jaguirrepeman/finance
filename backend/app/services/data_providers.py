@@ -46,6 +46,19 @@ from .http_client import fetch_with_retry, get_http_client
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# ISINs cuyas clases USD/EUR ambas existen en Finect.
+# El código de FinectAsyncProvider ya prefiere la clase EUR automáticamente
+# (ver _extract_nav y get_nav_history en FinectAsyncProvider).
+# Esta constante queda como documentación de los instrumentos que requirieron
+# atención especial. NO añadir lógica de bypass sobre esta constante:
+# el comportamiento correcto es que Finect los sirva en EUR.
+# ---------------------------------------------------------------------------
+_USD_DENOMINATED_ETPS: frozenset = frozenset({
+    "XS2940466316",  # Bitcoin ETP (21Shares / ETC Group – tiene clases USD y EUR)
+    "IE00B4ND3602",  # WisdomTree Physical Gold – tiene clases USD y EUR
+})
+
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -75,6 +88,19 @@ _SITEMAP_URLS = [
     "https://www.finect.com/v4/bff/sitemap/funds.xml",
     "https://www.finect.com/v4/bff/sitemap/etfs.xml",
 ]
+
+
+def _get_currency_code(currency_field: Any) -> str:
+    """Normaliza el campo currency de Finect a un código de moneda en mayúsculas.
+
+    Finect puede devolver este campo como cadena ("EUR") o como dict
+    ({'code': 'EUR', 'name': 'Euro'}).  Ambos formatos se normalizan a "EUR".
+    """
+    if not currency_field:
+        return ""
+    if isinstance(currency_field, dict):
+        return str(currency_field.get("code") or currency_field.get("name") or "").upper()
+    return str(currency_field).upper()
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +258,30 @@ def _extract_breakdown(model: Dict[str, Any], breakdown_type: str) -> Dict[str, 
 
 
 def _extract_nav(model: Dict[str, Any], isin: str) -> tuple:
-    for cls in model.get("classes", []):
-        if cls.get("isin") == isin:
-            quote = cls.get("lastQuote") or {}
-            price = quote.get("price")
-            dt = quote.get("datetime")
-            if price is not None and price > 0:
-                return float(price), dt[:10] if dt else None
+    """Extrae el NAV del modelo Finect prefiriendo la clase en EUR.
+
+    Estrategia:
+    1. Busca entre las clases del modelo la que tenga ``isin == isin``.
+    2. Si hay varias (p.ej. USD y EUR), prefiere la que ``currency == 'EUR'``.
+    3. Si solo hay una o ninguna coincide por divisa, usa la primera que coincida por ISIN.
+    4. Si no hay clase con ese ISIN, usa lastQuote del modelo raíz.
+    """
+    candidates = [cls for cls in model.get("classes", []) if cls.get("isin") == isin]
+
+    # Preferir EUR sobre cualquier otra divisa
+    eur_candidates = [
+        cls for cls in candidates
+        if _get_currency_code(cls.get("currency")) in ("EUR", "€")
+    ]
+    chosen = (eur_candidates or candidates)
+    for cls in chosen:
+        quote = cls.get("lastQuote") or {}
+        price = quote.get("price")
+        dt = quote.get("datetime")
+        if price is not None and price > 0:
+            return float(price), dt[:10] if dt else None
+
+    # Fallback al lastQuote del modelo raíz
     quote = model.get("lastQuote") or {}
     price = quote.get("price")
     dt = quote.get("datetime")
@@ -403,10 +446,20 @@ class FinectAsyncProvider(AsyncFundDataProvider):
         if model is None:
             return pd.DataFrame(columns=["date", "price"])
 
+        # Preferir la clase en EUR cuando exista (p.ej. ETPs Bitcoin/Gold
+        # que tienen clases tanto en USD como en EUR)
+        candidates = [cls for cls in model.get("classes", []) if cls.get("isin") == isin]
+        eur_candidates = [
+            cls for cls in candidates
+            if _get_currency_code(cls.get("currency")) in ("EUR", "€")
+        ]
+        chosen_classes = eur_candidates or candidates
+
         class_id: Optional[str] = None
-        for cls in model.get("classes", []):
-            if cls.get("isin") == isin:
-                class_id = cls.get("id")
+        for cls in chosen_classes:
+            cid = cls.get("id")
+            if cid:
+                class_id = cid
                 break
         if class_id is None:
             class_id = model.get("id")
@@ -703,8 +756,9 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
             return None
 
         try:
-            return await asyncio.to_thread(_sync)
-        except Exception as e:
+            # Timeout de 10 s para evitar cuelgues en tickers delisted o lentos
+            return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=10.0)
+        except (asyncio.TimeoutError, Exception) as e:
             logger.debug("YFinanceAsync.get_nav(%s) failed: %s", isin, e)
             return None
 
@@ -714,10 +768,12 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
     async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
         def _sync():
             import yfinance as yf
-            period_map = {1: "1y", 3: "3y", 5: "5y", 10: "10y"}
-            period = period_map.get(years, f"{years}y")
+            from datetime import datetime, timedelta
+            # Use start date instead of period string to support arbitrary years;
+            # yfinance handles long date ranges more reliably than period strings > 10y.
+            start_dt = (datetime.now() - timedelta(days=int(years) * 365)).strftime("%Y-%m-%d")
             ticker = yf.Ticker(isin)
-            hist = ticker.history(period=period)
+            hist = ticker.history(start=start_dt)
             if hist is None or hist.empty:
                 return pd.DataFrame(columns=["date", "price"])
             df = hist.reset_index()[["Date", "Close"]].rename(
@@ -728,7 +784,7 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
             currency = ticker.info.get("currency", "EUR") if ticker.info else "EUR"
             if currency == "USD":
                 fx = yf.Ticker("USDEUR=X")
-                fx_hist = fx.history(period=period)
+                fx_hist = fx.history(start=start_dt)
                 if fx_hist is not None and not fx_hist.empty:
                     fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
                         columns={"Date": "date", "Close": "fx"}
@@ -740,7 +796,7 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
                     df = df.drop(columns=["fx"])
             elif currency == "GBp":
                 fx = yf.Ticker("GBPEUR=X")
-                fx_hist = fx.history(period=period)
+                fx_hist = fx.history(start=start_dt)
                 if fx_hist is not None and not fx_hist.empty:
                     fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
                         columns={"Date": "date", "Close": "fx"}
@@ -798,6 +854,7 @@ class FMPAsyncProvider(AsyncFundDataProvider):
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or _get_fmp_api_key()
         self._symbol_cache: Dict[str, Optional[str]] = {}
+        self._currency_cache: Dict[str, str] = {}
 
     @property
     def available(self) -> bool:
@@ -817,14 +874,37 @@ class FMPAsyncProvider(AsyncFundDataProvider):
                 pass
         return None
 
+    # EUR-preferred exchange names as returned by FMP's exchangeShortName field.
+    # When search-isin returns multiple listings, we pick one from a EUR exchange
+    # before falling back to USD/USD-adjacent ones.
+    _EUR_EXCHANGES: frozenset = frozenset({
+        "EURONEXT", "XETRA", "AMSTERDAM", "PARIS", "MILAN", "MADRID",
+        "FRANKFURT", "BRUSSELS", "LISBON", "VIENNA", "HELSINKI",
+        "STOCKHOLM", "OSLO", "COPENHAGEN", "ATHENS", "ETF",
+    })
+
     async def _resolve_symbol(self, isin: str) -> Optional[str]:
+        """Resolve ISIN to a FMP symbol, preferring EUR-exchange listings."""
         if isin in self._symbol_cache:
             return self._symbol_cache[isin]
 
         data = await self._get("search-isin", {"isin": isin})
         symbol = None
         if data and isinstance(data, list) and len(data) > 0:
-            symbol = data[0].get("symbol")
+            # Prefer the first result whose exchange is a EUR-denominated market.
+            for item in data:
+                exch = (item.get("exchangeShortName") or "").upper()
+                if exch in self._EUR_EXCHANGES:
+                    symbol = item.get("symbol")
+                    logger.debug("FMP: preferred EUR exchange '%s' for %s", exch, isin)
+                    break
+            if not symbol:
+                # No EUR exchange found — take first result as last resort.
+                symbol = data[0].get("symbol")
+                logger.debug(
+                    "FMP: no EUR exchange for %s, using first result '%s' (exch=%s)",
+                    isin, symbol, data[0].get("exchangeShortName", "?"),
+                )
 
         if not symbol:
             data = await self._get("search", {"query": isin, "limit": "5"})
@@ -839,13 +919,47 @@ class FMPAsyncProvider(AsyncFundDataProvider):
         self._symbol_cache[isin] = symbol
         return symbol
 
+    async def _get_symbol_currency(self, symbol: str) -> str:
+        """Returns the trading currency for a FMP symbol (cached)."""
+        if symbol in self._currency_cache:
+            return self._currency_cache[symbol]
+        data = await self._get("profile", {"symbol": symbol})
+        currency = "EUR"
+        if data and isinstance(data, list) and len(data) > 0:
+            currency = data[0].get("currency") or "EUR"
+        self._currency_cache[symbol] = currency
+        return currency
+
+    async def _convert_price_to_eur(self, price: float, currency: str) -> float:
+        """Converts a price in the given currency to EUR using the FX rate."""
+        if currency == "EUR":
+            return price
+        if currency == "USD":
+            fx_data = await self._get("quote-short", {"symbol": "EURUSD"})
+            if fx_data and isinstance(fx_data, list) and len(fx_data) > 0:
+                eurusd = fx_data[0].get("price")
+                if eurusd and eurusd > 0:
+                    return price / float(eurusd)
+        elif currency == "GBp":
+            # London pence → GBP → EUR
+            fx_data = await self._get("quote-short", {"symbol": "GBPEUR"})
+            if fx_data and isinstance(fx_data, list) and len(fx_data) > 0:
+                gbpeur = fx_data[0].get("price")
+                if gbpeur and gbpeur > 0:
+                    return (price / 100.0) * float(gbpeur)
+        return price
+
     async def get_nav(self, isin: str) -> Optional[float]:
         symbol = await self._resolve_symbol(isin)
         if not symbol:
             return None
         data = await self._get("quote-short", {"symbol": symbol})
         if data and isinstance(data, list) and len(data) > 0:
-            return data[0].get("price")
+            raw_price = data[0].get("price")
+            if raw_price is None:
+                return None
+            currency = await self._get_symbol_currency(symbol)
+            return await self._convert_price_to_eur(float(raw_price), currency)
         return None
 
     async def get_nav_date(self, isin: str) -> Optional[str]:
@@ -861,12 +975,42 @@ class FMPAsyncProvider(AsyncFundDataProvider):
         if not data or not isinstance(data, list):
             return pd.DataFrame(columns=["date", "price"])
         df = pd.DataFrame(data)
-        if "date" in df.columns and "close" in df.columns:
-            df = df.rename(columns={"close": "price"})[["date", "price"]]
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-            return df
-        return pd.DataFrame(columns=["date", "price"])
+        if "date" not in df.columns or "close" not in df.columns:
+            return pd.DataFrame(columns=["date", "price"])
+        df = df.rename(columns={"close": "price"})[["date", "price"]]
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        # Apply currency conversion to EUR
+        currency = await self._get_symbol_currency(symbol)
+        if currency == "USD":
+            fx_data = await self._get(
+                "historical-price-eod/light",
+                {"symbol": "EURUSD", "from": start},
+            )
+            if fx_data and isinstance(fx_data, list):
+                fx_df = pd.DataFrame(fx_data)
+                if "date" in fx_df.columns and "close" in fx_df.columns:
+                    fx_df = fx_df.rename(columns={"close": "eurusd"})[["date", "eurusd"]]
+                    fx_df["date"] = pd.to_datetime(fx_df["date"])
+                    df = df.merge(fx_df, on="date", how="left")
+                    df["eurusd"] = df["eurusd"].ffill().bfill()
+                    df["price"] = df["price"] / df["eurusd"]
+                    df = df.drop(columns=["eurusd"])
+        elif currency == "GBp":
+            fx_data = await self._get(
+                "historical-price-eod/light",
+                {"symbol": "GBPEUR", "from": start},
+            )
+            if fx_data and isinstance(fx_data, list):
+                fx_df = pd.DataFrame(fx_data)
+                if "date" in fx_df.columns and "close" in fx_df.columns:
+                    fx_df = fx_df.rename(columns={"close": "gbpeur"})[["date", "gbpeur"]]
+                    fx_df["date"] = pd.to_datetime(fx_df["date"])
+                    df = df.merge(fx_df, on="date", how="left")
+                    df["gbpeur"] = df["gbpeur"].ffill().bfill()
+                    df["price"] = (df["price"] / 100.0) * df["gbpeur"]
+                    df = df.drop(columns=["gbpeur"])
+        return df.reset_index(drop=True)
 
     async def get_fund_info(self, isin: str) -> Dict[str, Any]:
         symbol = await self._resolve_symbol(isin)
@@ -937,18 +1081,14 @@ class FMPAsyncProvider(AsyncFundDataProvider):
 # ---------------------------------------------------------------------------
 
 
-# ISINs priced in a foreign currency (e.g. USD) — Finect may return
-# the raw foreign-currency price without conversion.  Force yfinance,
-# which explicitly converts to EUR via the FX rate.
-#
-# XS2940466316: iShares Bitcoin ETP — listed on Amsterdam (AMS) in USD.
-#   yfinance reports currency="USD"; the EUR-denominated class on Xetra
-#   uses the same ISIN but yfinance resolves to the AMS/USD listing.
-#   Adding here forces USD→EUR FX conversion in get_nav and get_nav_history.
-_FORCE_YF_ISINS: frozenset = frozenset([
-    "IE00B4ND3602",  # iShares Physical Gold ETC (USD-priced on exchange)
-    "XS2940466316",  # iShares Bitcoin ETP (Amsterdam USD listing; need EUR conversion)
-])
+# Note: _FORCE_YF_ISINS was removed. Previously it bypassed Finect for certain
+# ETFs and used yfinance (with USD→EUR FX conversion) instead. Investigation
+# confirmed that Finect's ETF sitemap already contains these ISINs (e.g.
+# IE00B4ND3602 Gold ETC, XS2940466316 Bitcoin ETP) and returns EUR prices
+# directly. Bypassing Finect was causing the USD-price problem, not fixing it.
+# The correct approach: let Finect be the primary source for ALL ISINs.
+# yfinance FX conversion is kept ONLY as a generic safety net for any fund
+# that Finect/FMP do not cover.
 
 
 class CompositeAsyncProvider:
@@ -998,20 +1138,11 @@ class CompositeAsyncProvider:
     # ------------------------------------------------------------------
 
     async def get_nav(self, isin: str) -> Optional[float]:
-        """NAV actual con early termination sobre la cadena."""
-        # For USD-priced instruments, always use yfinance (handles FX conversion).
-        if isin in _FORCE_YF_ISINS:
-            try:
-                price = await self._yf.get_nav(isin)
-                if price and price > 0:
-                    nav_date = await self._yf.get_nav_date(isin)
-                    await self._cache.aset(CacheStore.nav_key(isin), price, TTL_NAV)
-                    if nav_date:
-                        await self._cache.aset(CacheStore.nav_date_key(isin), nav_date, TTL_NAV)
-                    return price
-            except Exception as e:
-                logger.debug("YF.get_nav(%s) fallback failed: %s", isin, e)
+        """NAV actual con early termination sobre la cadena.
 
+        Estrategia: Finect (siempre en EUR, preferencia de clase EUR) →
+        yfinance (con conversión FX si necesario) → FMP.
+        """
         # Check cache primero
         if not self._force_refresh:
             cached = await self._cache.aget(CacheStore.nav_key(isin))
@@ -1074,28 +1205,23 @@ class CompositeAsyncProvider:
     # ------------------------------------------------------------------
 
     async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        """Histórico: gather todos los providers, devuelve la serie más larga."""
-        # For USD-priced instruments, always fetch from yfinance (handles FX).
-        if isin in _FORCE_YF_ISINS:
-            try:
-                df = await self._yf.get_nav_history(isin, years=years)
-                if df is not None and not df.empty:
-                    df = df.copy()
-                    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-                    cache_data = df[["date", "price"]].copy()
-                    cache_data["date"] = cache_data["date"].dt.strftime("%Y-%m-%d")
-                    await self._cache.aset(
-                        CacheStore.nav_history_key(isin, years),
-                        cache_data.to_dict(orient="records"),
-                        TTL_NAV_HISTORY,
-                    )
-                    return df
-            except Exception as e:
-                logger.debug("YF.get_nav_history(%s) failed: %s", isin, e)
+        """Histórico: gather todos los providers, prioridad Finect→YF→FMP.
 
-        # Check cache
+        Finect prefiere la clase EUR cuando existen varias (p.ej. Bitcoin/Gold);
+        en fechas solapadas, su precio tiene prioridad (keep='first' en el merge).
+        Patrón stale-while-revalidate: si el refresco devuelve menos datos que
+        la caché expirada, se usa la caché expirada + el nuevo punto más reciente.
+        """
+        cache_key = CacheStore.nav_history_key(isin, years)
+
+        # Load stale data first (before aget can delete the expired entry)
+        stale_cached: Optional[list] = None
         if not self._force_refresh:
-            cached = await self._cache.aget(CacheStore.nav_history_key(isin, years))
+            stale_cached = await self._cache.aget_stale(cache_key)
+
+        # Check fresh cache (may delete expired entry as a side effect)
+        if not self._force_refresh:
+            cached = await self._cache.aget(cache_key)
             if cached is not None:
                 df = pd.DataFrame(cached)
                 if not df.empty:
@@ -1116,25 +1242,65 @@ class CompositeAsyncProvider:
         results = await asyncio.gather(*[_fetch(p) for p in self._history_chain])
         non_empty = [r for r in results if not r.empty]
 
+        # Build provider labels (Finect, YahooFinance, FMP) for source tracking
+        _provider_labels = [
+            "Finect" if "finect" in type(p).__name__.lower()
+            else "YahooFinance" if "yfinance" in type(p).__name__.lower() or "yahoo" in type(p).__name__.lower()
+            else "FMP"
+            for p in self._history_chain
+        ]
+
         if not non_empty:
+            # No fresh data at all — use stale cache if available
+            if stale_cached:
+                logger.warning(
+                    "get_nav_history(%s): todos los providers fallaron, usando caché expirada (%d filas)",
+                    isin, len(stale_cached),
+                )
+                df_stale = pd.DataFrame(stale_cached)
+                df_stale["date"] = pd.to_datetime(df_stale["date"])
+                return df_stale
             return pd.DataFrame(columns=["date", "price"])
 
         if len(non_empty) == 1:
             result = non_empty[0]
         else:
-            # Merge: concatenar y deduplicar por fecha (keep longest)
-            sorted_by_len = sorted(non_empty, key=len)
-            combined = pd.concat(sorted_by_len).drop_duplicates(subset="date", keep="last")
+            # Merge: concatenar en orden de prioridad (finect → yf → fmp).
+            # keep="first" → el primer proveedor de la cadena gana en fechas solapadas,
+            # garantizando que los precios de finect/yf (ya en EUR) tengan prioridad
+            # sobre FMP que puede devolver precios en USD sin convertir.
+            combined = pd.concat(non_empty).drop_duplicates(subset="date", keep="first")
+            result = combined.sort_values("date").reset_index(drop=True)
+
+        # Stale-while-revalidate: if fresh result is much smaller than stale cache,
+        # merge stale data with the fresh data (fresh points take priority).
+        if stale_cached and len(result) < len(stale_cached) * 0.5:
+            logger.warning(
+                "get_nav_history(%s): datos frescos (%d filas) << caché expirada (%d filas) — mergeando",
+                isin, len(result), len(stale_cached),
+            )
+            df_stale = pd.DataFrame(stale_cached)
+            df_stale["date"] = pd.to_datetime(df_stale["date"]).dt.tz_localize(None)
+            # Combine: fresh data has priority (keep="last" after sorting so fresh rows overwrite stale)
+            combined = pd.concat([df_stale, result]).drop_duplicates(subset="date", keep="last")
             result = combined.sort_values("date").reset_index(drop=True)
 
         # Guardar en cache
         cache_data = result[["date", "price"]].copy()
         cache_data["date"] = cache_data["date"].dt.strftime("%Y-%m-%d")
         await self._cache.aset(
-            CacheStore.nav_history_key(isin, years),
+            cache_key,
             cache_data.to_dict(orient="records"),
             TTL_NAV_HISTORY,
         )
+
+        # Store per-provider source metadata alongside merged cache
+        sources_metadata = {
+            label: len(results[i]) if not results[i].empty else 0
+            for i, label in enumerate(_provider_labels)
+        }
+        sources_key = CacheStore.nav_history_sources_key(isin, years)
+        await self._cache.aset(sources_key, sources_metadata, TTL_NAV_HISTORY)
 
         return result
 

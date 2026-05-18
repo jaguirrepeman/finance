@@ -15,7 +15,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import endpoints
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Portfolio Tracker API",
-    description="Backend para el dashboard de Portfolio Financiero (v2 async)",
+    description="Backend para el dashboard de Portfolio Financiero",
     version="0.3.0",
     lifespan=lifespan,
 )
@@ -91,6 +92,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress large JSON responses (history_batch, real-evolution, etc.)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
@@ -109,37 +113,28 @@ def health_check():
 
 
 # ---------------------------------------------------------------------------
-# Frontend estático
+# Frontend estático (Vite build output)
 # ---------------------------------------------------------------------------
 
-FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+FRONTEND_LEGACY = Path(__file__).resolve().parent.parent.parent / "frontend-deprecated"
+
+# Choose whichever exists — prefer new Vite build, fallback to legacy
+FRONTEND_DIR = FRONTEND_DIST if FRONTEND_DIST.is_dir() else FRONTEND_LEGACY
 
 if FRONTEND_DIR.is_dir():
-
-    @app.get("/", include_in_schema=False)
-    def serve_index():
+    # SPA catch-all: any non-API, non-file route → index.html
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        file_path = FRONTEND_DIR / full_path
+        if full_path and file_path.is_file():
+            return FileResponse(str(file_path))
         return FileResponse(str(FRONTEND_DIR / "index.html"))
 
-    @app.get("/components.js", include_in_schema=False)
-    def serve_components_js():
-        """Serve components.js sin cache para que el navegador siempre cargue la versión más reciente."""
-        with open(str(FRONTEND_DIR / "components.js"), "rb") as f:
-            content = f.read()
-        return Response(
-            content=content,
-            media_type="application/javascript",
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-        )
-
-    @app.get("/style.css", include_in_schema=False)
-    def serve_style_css():
-        """Serve style.css sin cache."""
-        with open(str(FRONTEND_DIR / "style.css"), "rb") as f:
-            content = f.read()
-        return Response(
-            content=content,
-            media_type="text/css",
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-        )
-
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(FRONTEND_DIR / "assets"))
+        if (FRONTEND_DIR / "assets").is_dir()
+        else StaticFiles(directory=str(FRONTEND_DIR)),
+        name="assets",
+    )

@@ -347,10 +347,63 @@ class AsyncPortfolioCore:
     # ------------------------------------------------------------------
 
     async def tax_optimize(self, target_amount: float) -> pd.DataFrame:
-        """Plan de retirada fiscal óptimo."""
+        """Plan de retirada fiscal óptimo (FIFO puro, sin traspasos)."""
+        import asyncio as _asyncio
+        import re as _re
+        _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+
         isins = list(self.portfolio.positions.keys())
-        prices = await self.provider.get_nav_batch(isins)
-        optimizer = TaxOptimizer(self.portfolio, prices=prices)
+
+        # Usar caché en disco como fuente primaria (evita llamadas de red lentas)
+        prices = self._prices_from_calculated_cache(isins)
+        missing = [i for i in isins if i not in prices]
+        if missing:
+            try:
+                live_prices = await _asyncio.wait_for(
+                    self.provider.get_nav_batch(missing), timeout=15.0
+                )
+                prices.update({k: v for k, v in live_prices.items() if v and v > 0})
+            except Exception:
+                pass
+
+        # Resolver nombres para enriquecer el plan
+        mov = self.portfolio.movements
+        name_from_mov: Dict[str, str] = {}
+        if not mov.empty and "Fondo" in mov.columns:
+            raw = (
+                mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
+                .groupby("ISIN")["Fondo"]
+                .first()
+                .to_dict()
+            )
+            name_from_mov = {k: str(v) for k, v in raw.items() if v == v}
+
+        def _is_good_name(s: str) -> bool:
+            return bool(s) and s.lower() != "nan" and not _ISIN_RE.match(s.strip())
+
+        isins_need_name = [i for i in isins if not _is_good_name(name_from_mov.get(i, ""))]
+        resolved: Dict[str, str] = {}
+        if isins_need_name:
+            try:
+                resolved = await _asyncio.wait_for(
+                    self.provider.resolve_names_batch(isins_need_name), timeout=8.0
+                )
+            except Exception:
+                pass
+
+        def _name(isin: str) -> str:
+            n = name_from_mov.get(isin, "")
+            if _is_good_name(n):
+                return n
+            return resolved.get(isin, isin)
+
+        # fund_meta básico para clasificar ETFs
+        fund_meta: Dict[str, Dict] = {
+            isin: {"name": _name(isin), "is_index": False}
+            for isin in isins
+        }
+
+        optimizer = TaxOptimizer(self.portfolio, prices=prices, fund_meta=fund_meta)
         plan = optimizer.optimize_withdrawal(target_amount)
 
         rows = plan.get("plan", [])
@@ -362,35 +415,8 @@ class AsyncPortfolioCore:
 
         df = pd.DataFrame(rows)
 
-        # ── Enriquecer nombres de fondo ──────────────────────────────────────
-        import re as _re
-        _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
-        mov = self.portfolio.movements
-        name_from_mov: Dict[str, str] = {}
-        if not mov.empty and "Fondo" in mov.columns:
-            name_from_mov = (
-                mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
-                .groupby("ISIN")["Fondo"]
-                .first()
-                .to_dict()
-            )
-
-        isins_need_name = [
-            isin for isin in isins
-            if not (name_from_mov.get(isin) and not _ISIN_RE.match(name_from_mov[isin].strip()))
-        ]
-        resolved: Dict[str, str] = {}
-        if isins_need_name:
-            resolved = await self.provider.resolve_names_batch(isins_need_name)
-
-        def _name(isin: str) -> str:
-            n = name_from_mov.get(isin, "")
-            if n and not _ISIN_RE.match(n.strip()):
-                return n
-            return resolved.get(isin, isin)
-
+        # Aplicar nombres ya resueltos arriba
         df["Fondo"] = df["ISIN"].map(_name)
-        # ────────────────────────────────────────────────────────────────────
 
         totals = pd.DataFrame([{
             "ISIN": "── TOTAL ──",
@@ -408,6 +434,40 @@ class AsyncPortfolioCore:
         df.attrs["estimated_tax"] = plan["estimated_tax"]
         df.attrs["net_amount"] = plan["net_amount"]
         return df
+
+    @staticmethod
+    def _prices_from_calculated_cache(isins: List[str]) -> Dict[str, float]:
+        """Lee precios unitarios (NAV) desde summary.json sin ninguna llamada de red.
+
+        summary.json es generado por el backend y contiene 'NAV (Precio)' por ISIN.
+        Devuelve un dict {isin: precio_unitario} solo con los ISINs con precio > 0.
+        """
+        import json as _json
+        import os as _os
+
+        prices: Dict[str, float] = {}
+        try:
+            _calc_dir = _os.path.join(
+                _os.path.dirname(_os.path.dirname(__file__)), "data", "calculated"
+            )
+            _summary_path = _os.path.join(_calc_dir, "summary.json")
+            if not _os.path.exists(_summary_path):
+                return prices
+            with open(_summary_path, "r", encoding="utf-8") as _f:
+                _summary = _json.load(_f)
+            for _fund in _summary.get("funds") or []:
+                _isin = _fund.get("ISIN") or _fund.get("isin") or ""
+                _nav = _fund.get("NAV (Precio)") or _fund.get("nav") or 0
+                if _isin in isins:
+                    try:
+                        _price = float(_nav)
+                        if _price > 0:
+                            prices[_isin] = _price
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass
+        return prices
 
     async def optimize_withdrawal_via_traspaso(
         self,
@@ -433,29 +493,50 @@ class AsyncPortfolioCore:
         _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
         isins = list(self.portfolio.positions.keys())
-        prices = await self.provider.get_nav_batch(isins)
+
+        # Usar precios cacheados en disco como fuente primaria (sin I/O de red)
+        prices = self._prices_from_calculated_cache(isins)
+        missing = [i for i in isins if i not in prices]
+        if missing:
+            try:
+                live_prices = await _asyncio.wait_for(
+                    self.provider.get_nav_batch(missing), timeout=15.0
+                )
+                prices.update({k: v for k, v in live_prices.items() if v and v > 0})
+            except Exception:
+                pass  # ISINs sin precio serán omitidos del plan
 
         # ── Resolver nombres ──
         mov = self.portfolio.movements
         name_from_mov: Dict[str, str] = {}
         if not mov.empty and "Fondo" in mov.columns:
-            name_from_mov = (
+            raw_names = (
                 mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
                 .groupby("ISIN")["Fondo"]
                 .first()
                 .to_dict()
             )
+            name_from_mov = {k: str(v) for k, v in raw_names.items() if v == v}  # exclude NaN
+
+        def _is_good_name_opt(s: str) -> bool:
+            return bool(s) and s.lower() != "nan" and not _ISIN_RE.match(s.strip())
+
         isins_need_name = [
             i for i in isins
-            if not (name_from_mov.get(i) and not _ISIN_RE.match(name_from_mov[i].strip()))
+            if not _is_good_name_opt(name_from_mov.get(i, ""))
         ]
         resolved: Dict[str, str] = {}
         if isins_need_name:
-            resolved = await self.provider.resolve_names_batch(isins_need_name)
+            try:
+                resolved = await _asyncio.wait_for(
+                    self.provider.resolve_names_batch(isins_need_name), timeout=8.0
+                )
+            except Exception:
+                pass  # fall back to ISIN as name
 
         def _name(isin: str) -> str:
             n = name_from_mov.get(isin, "")
-            if n and not _ISIN_RE.match(n.strip()):
+            if _is_good_name_opt(n):
                 return n
             return resolved.get(isin, isin)
 
@@ -465,7 +546,9 @@ class AsyncPortfolioCore:
 
         async def _get_meta(isin: str):
             try:
-                info = await self.provider.get_fund_info(isin) or {}
+                info = await _asyncio.wait_for(
+                    self.provider.get_fund_info(isin), timeout=5.0
+                ) or {}
                 name = _name(isin)
                 idx = _is_index(info=info, name=name)
                 return isin, {"name": name, "is_index": idx}
@@ -505,23 +588,42 @@ class AsyncPortfolioCore:
         if not isins:
             return []
 
-        prices = await self.provider.get_nav_batch(isins)
+        # Fuente primaria: precios calculados en disco (sin I/O de red, instantáneo)
+        prices = self._prices_from_calculated_cache(isins)
+
+        # Solo llamar al proveedor para ISINs sin precio en la caché local
+        missing = [i for i in isins if i not in prices]
+        if missing:
+            try:
+                import asyncio as _asyncio_ta
+                live_prices = await _asyncio_ta.wait_for(
+                    self.provider.get_nav_batch(missing), timeout=15.0
+                )
+                prices.update({k: v for k, v in live_prices.items() if v and v > 0})
+            except Exception:
+                pass  # ISINs sin precio serán omitidos en el análisis
 
         # Resolver nombres
         import re as _re
+        from .services.fund_classifier import is_etf_or_etp
         _ISIN_RE = _re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
         mov = self.portfolio.movements
         name_from_mov: Dict[str, str] = {}
         if not mov.empty and "Fondo" in mov.columns:
-            name_from_mov = (
+            raw = (
                 mov[mov["Fondo"].astype(str).str.upper() != mov["ISIN"].astype(str).str.upper()]
                 .groupby("ISIN")["Fondo"]
                 .first()
                 .to_dict()
             )
+            name_from_mov = {k: str(v) for k, v in raw.items() if v == v}  # exclude NaN
+
+        def _is_good_name(s: str) -> bool:
+            return bool(s) and s.lower() != "nan" and not _ISIN_RE.match(s.strip())
+
         isins_need_name = [
             i for i in isins
-            if not (name_from_mov.get(i) and not _ISIN_RE.match(name_from_mov[i].strip()))
+            if not _is_good_name(name_from_mov.get(i, ""))
         ]
         resolved: Dict[str, str] = {}
         if isins_need_name:
@@ -529,7 +631,7 @@ class AsyncPortfolioCore:
 
         def _name(isin: str) -> str:
             n = name_from_mov.get(isin, "")
-            if n and not _ISIN_RE.match(n.strip()):
+            if _is_good_name(n):
                 return n
             return resolved.get(isin, isin)
 
@@ -570,23 +672,23 @@ class AsyncPortfolioCore:
             plusvalia_pct = (plusvalia / capital_invertido * 100) if capital_invertido > 0 else 0.0
             impuesto = _tax(plusvalia) if plusvalia > 0 else 0.0
 
-            # Los fondos de inversión registrados en la CNMV / ESMA cualifican para traspaso.
-            # Como heurística conservadora asumimos que todos los fondos de la cartera
-            # son IICs (fondos de inversión / SICAV), no ETFs.
-            # El usuario debe verificar que no hay ETFs o acciones en cartera.
-            cualifica = True  # Asumir IIC hasta que se implemente clasificación automática
+            # Clasificar si es ETF/ETP (NO traspasable según Art. 94 Ley 35/2006 IRPF)
+            nombre = _name(isin)
+            etf = is_etf_or_etp(isin=isin, name=nombre)
+            cualifica = not etf  # ETFs/ETPs no pueden traspasarse
 
             result.append({
                 "isin": isin,
-                "nombre": _name(isin),
+                "nombre": nombre,
                 "valor_actual": round(valor_actual, 2),
                 "capital_invertido": round(capital_invertido, 2),
                 "plusvalia_latente": round(plusvalia, 2),
                 "plusvalia_pct": round(plusvalia_pct, 2),
                 "impuesto_si_vendes": round(impuesto, 2),
-                "ahorro_traspaso": round(impuesto, 2),  # = 0 si plusvalía < 0
+                "ahorro_traspaso": round(impuesto, 2) if cualifica else 0.0,  # ETFs: ahorro = 0
                 "num_lotes": len(lots),
                 "cualifica_traspaso": cualifica,
+                "is_etf": etf,
             })
 
         # Ordenar: primero los que más ahorro generan

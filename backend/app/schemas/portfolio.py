@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any
 class FundBase(BaseModel):
     Fondo: str
     TIPO: str
-    Porcentaje: float
+    Porcentaje: float = 0.0
     ISIN: Optional[str] = None
 
     # Datos extendidos que rellenan los analyzers
@@ -21,6 +21,8 @@ class FundBase(BaseModel):
     IsIndex: Optional[bool] = None
     Valor_Actual: Optional[float] = None
     Capital_Invertido: Optional[float] = None
+    Participaciones: Optional[float] = None
+    Fecha_Compra: Optional[str] = None
     Ganancia_Abs: Optional[float] = None
     Ganancia_Pct: Optional[float] = None
     finect_url: Optional[str] = None  # Full Finect URL with slug
@@ -93,6 +95,7 @@ class TaxPlanStep(BaseModel):
     Participaciones_Vendidas: float
     Importe_Retirado: float
     Ganancia_Patrimonial: float
+    es_etf: bool = False  # True si es ETF/ETP (no traspasable en España)
 
 
 class TaxOptimizeResponse(BaseModel):
@@ -146,6 +149,7 @@ class FundSearchResult(BaseModel):
     management_company: Optional[str] = None
     in_portfolio: bool = False
     url: Optional[str] = None  # Full Finect URL with slug
+    ticker: Optional[str] = None  # Exchange ticker (e.g. NUKL, WNUC)
 
 
 class TraspasoFundItem(BaseModel):
@@ -160,6 +164,7 @@ class TraspasoFundItem(BaseModel):
     ahorro_traspaso: float = 0.0
     num_lotes: int = 0
     cualifica_traspaso: bool = True
+    is_etf: bool = False  # True si es ETF/ETP (no traspasable en España)
 
 
 # ---------------------------------------------------------------------------
@@ -187,12 +192,14 @@ class TraspasoLotStep(BaseModel):
     Destination_Fondo: Optional[str] = None
     Precio_Compra_Unitario: float = 0.0
     Nota: Optional[str] = None
+    es_etf: bool = False  # True si es ETF/ETP (no traspasable en España)
 
 
 class EscenarioFiscal(BaseModel):
     """Resultado fiscal de un escenario (directo u optimizado)."""
     ganancia_patrimonial: float = 0.0
     impuesto: float = 0.0
+    withdrawn_amount: float = 0.0
     neto_recibido: float = 0.0
     detalle: List[TraspasoLotStep] = []
 
@@ -204,6 +211,42 @@ class DestinationFund(BaseModel):
     tipo: str = "new_suggestion"   # "portfolio_index" | "new_suggestion"
     is_index: bool = True
     motivo: str = ""
+
+
+class LossHarvestingCandidate(BaseModel):
+    """Un lote candidato a tax-loss harvesting."""
+    ISIN: str
+    Fondo: str = ""
+    es_etf: bool = False
+    Fecha_Compra: Optional[str] = None
+    lot_loss: float = 0.0
+    lot_value: float = 0.0
+    preceding_forced_gain: float = 0.0
+    preceding_forced_value: float = 0.0
+    preceding_transfer_value: float = 0.0
+    net_harvest_gain: float = 0.0
+    additional_cash: float = 0.0
+    antiaplicacion_plazo: str = ""
+
+
+class LossHarvestingSuggestion(BaseModel):
+    """Sugerencia bidireccional de harvesting fiscal.
+
+    direction:
+      - ``harvest_losses``: vender lotes en pérdida para compensar ganancias del plan.
+      - ``harvest_gains``: vender lotes con ganancia aprovechando pérdidas del plan →
+        dinero extra sin coste fiscal.
+      - ``none``: sin sugerencia (ganancia neta = 0).
+    """
+    direction: str = "none"
+    candidates: List[LossHarvestingCandidate] = []
+    base_net_gain: float = 0.0
+    base_tax: float = 0.0
+    total_harvestable_loss: float = 0.0
+    net_gain_after_harvest: float = 0.0
+    tax_after_harvest: float = 0.0
+    tax_savings: float = 0.0
+    additional_cash: float = 0.0
 
 
 class TraspasoOptimizeResponse(BaseModel):
@@ -222,6 +265,8 @@ class TraspasoOptimizeResponse(BaseModel):
     destination_fund: Optional[DestinationFund] = None
     destination_alternatives: List[Dict[str, Any]] = []
     portfolio_after: List[Dict[str, Any]] = []
+    non_traspasable_isins: List[str] = []  # ETFs/ETPs en cartera (no traspasables)
+    loss_harvesting: Optional[LossHarvestingSuggestion] = None
     notas: str = ""
 
 

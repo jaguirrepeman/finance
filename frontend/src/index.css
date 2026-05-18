@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+/* ─── Glassmorphism Design Tokens ─────────────────────────────────────────── */
+@theme {
+  /* Colors — Premium Dark Mode HSL Palette */
+  --color-bg-dark: hsl(220, 30%, 8%);
+  --color-bg-glass: hsla(220, 30%, 15%, 0.6);
+  --color-bg-glass-hover: hsla(220, 30%, 18%, 0.7);
+  --color-border-glass: hsla(220, 30%, 40%, 0.2);
+  --color-border-glass-hover: hsla(220, 30%, 50%, 0.3);
+  --color-text-primary: hsl(0, 0%, 98%);
+  --color-text-secondary: hsl(220, 20%, 70%);
+  --color-text-muted: hsl(220, 15%, 50%);
+  --color-accent-glow: hsl(210, 100%, 65%);
+  --color-accent-secondary: hsl(280, 80%, 60%);
+  --color-success: hsl(150, 80%, 40%);
+  --color-warning: hsl(40, 90%, 55%);
+  --color-danger: hsl(350, 80%, 55%);
+
+  /* Chart palette */
+  --color-chart-1: #4ca1af;
+  --color-chart-2: #c4e0e5;
+  --color-chart-3: #89f7fe;
+  --color-chart-4: #66a6ff;
+  --color-chart-5: #f3a183;
+  --color-chart-6: #a18cd1;
+  --color-chart-7: #fbc2eb;
+  --color-chart-8: #fad0c4;
+  --color-chart-9: #ff9a9e;
+  --color-chart-10: #fecfef;
+
+  /* Font */
+  --font-sans: "Inter", sans-serif;
+
+  /* Shadows */
+  --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  --shadow-glass-hover: 0 12px 40px hsla(210, 100%, 65%, 0.1);
+
+  /* Radius */
+  --radius-glass: 20px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  /* Animations */
+  --animate-spin: spin 1s infinite linear;
+}
+
+@keyframes spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── Base Styles ─────────────────────────────────────────────────────────── */
+body {
+  background-color: var(--color-bg-dark);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  background-image: radial-gradient(
+      circle at 15% 50%,
+      hsla(280, 80%, 60%, 0.08) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      circle at 85% 30%,
+      hsla(210, 100%, 65%, 0.08) 0%,
+      transparent 50%
+    );
+}
+
+/* ─── Utility Components ──────────────────────────────────────────────────── */
+@utility glass-panel {
+  background: var(--color-bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border-glass);
+  border-radius: var(--radius-glass);
+  box-shadow: var(--shadow-glass);
+}
+
+@utility glass-panel-sm {
+  background: var(--color-bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border-glass);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-glass);
+}
+
+/* Financial number formatting */
+@utility tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Gradient text effect for headings */
+@utility gradient-text {
+  background: linear-gradient(
+    90deg,
+    var(--color-text-primary),
+    var(--color-text-secondary)
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsla(220, 30%, 40%, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsla(220, 30%, 50%, 0.5);
+}
+
+/* Hide number input spinner arrows */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}

@@ -55,6 +55,31 @@ _INDEX_MARKERS = frozenset([
     "fidelity index", "xtrackers",
 ])
 
+# ETFs / ETPs — NOT traspasable under Spanish law (Art. 94 Ley 35/2006 IRPF
+# only applies to Instituciones de Inversión Colectiva registered as fondos
+# de inversión). ETFs trade on stock exchanges and are treated as equity sales.
+_ETF_ETP_KEYWORDS = frozenset([
+    " etf", "(etf)", "exchange traded fund", "exchange-traded fund",
+    " etp", "(etp)", "exchange traded product", "exchange-traded product",
+    "physical gold", "physical silver", "physical bitcoin", "physical crypto",
+    "bitcoin etp", "bitcoin etf", "crypto etp", "crypto etf",
+    "xtrackers", "invesco qqq", "spdr",
+])
+
+# Known ETF/ETP ISINs in the portfolio (hardcoded as fallback detection)
+_KNOWN_ETF_ETP_ISINS: frozenset[str] = frozenset([
+    # iShares Physical Gold ETC (LSE/Xetra)
+    "IE00B4ND3602",
+    # iShares Core MSCI World ETF (common variants)
+    "IE00B4L5Y983",
+    # WisdomTree Physical Bitcoin
+    "GB00BJYDH287",
+    # 21Shares Bitcoin ETP
+    "CH0454664001",
+    # Generic iShares Bitcoin ETF
+    "US46090E1038",
+])
+
 
 def classify_fund(
     info: Optional[Dict[str, Any]] = None,
@@ -95,6 +120,41 @@ def classify_fund(
 
     # Default: Renta Variable
     return FundType.RV
+
+
+def is_etf_or_etp(
+    isin: Optional[str] = None,
+    info: Optional[Dict[str, Any]] = None,
+    name: Optional[str] = None,
+    category: Optional[str] = None,
+) -> bool:
+    """Determina si un producto es un ETF o ETP (no traspasable en España).
+
+    Bajo el Art. 94 Ley 35/2006 IRPF, el régimen de diferimiento fiscal
+    (traspaso sin tributar) solo aplica a Instituciones de Inversión Colectiva
+    (IICs) registradas como **fondos de inversión**. Los ETFs y ETPs cotizan
+    en bolsa y se tratan como ventas de acciones → siempre tributan.
+
+    Args:
+        isin: ISIN del producto (consulta lista de ISINs conocidos).
+        info: Dict con al menos 'name' y/o 'categoryName'.
+        name: Nombre del fondo (override directo).
+        category: Categoría (override directo).
+
+    Returns:
+        True si el producto es un ETF o ETP (no traspasable).
+    """
+    if isin and isin.upper() in _KNOWN_ETF_ETP_ISINS:
+        return True
+
+    if info is None:
+        info = {}
+
+    fund_name = (name or info.get("name", "")).lower()
+    fund_cat = (category or info.get("categoryName", "") or "").lower()
+    combined = f" {fund_name} {fund_cat} "  # pad with spaces for word-boundary matching
+
+    return any(kw in combined for kw in _ETF_ETP_KEYWORDS)
 
 
 def is_index_fund(

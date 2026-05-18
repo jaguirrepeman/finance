@@ -10,6 +10,7 @@ simulate, evolution-metrics, performance, traspaso-analysis, upload-orders.
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+import logging
 import os
 import shutil
 from typing import List
@@ -35,6 +36,8 @@ from ..schemas.portfolio import (
     DestinationFund,
     TraspasoLotStep,
     EscenarioFiscal,
+    LossHarvestingCandidate,
+    LossHarvestingSuggestion,
 )
 from ..services.portfolio_service import (
     CACHE_DIR,
@@ -63,6 +66,17 @@ from ..services.portfolio_service import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+# In-memory TTL caches for slow endpoints
+# ---------------------------------------------------------------------------
+import time as _time
+
+_traspaso_analysis_cache: dict = {"data": None, "ts": 0.0}
+_TRASPASO_ANALYSIS_TTL = 30 * 60  # 30 minutes
+
+# In-memory TTL cache for portfolio comparison results (keyed by hash of request body)
+_compare_portfolios_cache: dict[str, dict] = {}
+_COMPARE_PORTFOLIOS_TTL = 20 * 60  # 20 minutes
 
 
 # =========================================================================
@@ -108,6 +122,17 @@ async def get_enriched_portfolio(background_tasks: BackgroundTasks):
         }
     }
     return cached
+
+
+@router.post("/recalculate")
+async def recalculate_portfolio():
+    """Resetea el portfolio en memoria para que se recalcule con los datos persistidos actuales.
+
+    Útil después de añadir/eliminar posiciones manuales o correcciones. No descarga datos externos.
+    """
+    from ..services.portfolio_service import reset_client
+    reset_client()
+    return {"message": "✅ Portfolio recalculado con los datos guardados."}
 
 
 @router.get("/refresh-nav", response_model=AnalysisResponse)
@@ -233,10 +258,10 @@ async def get_history_batch(background_tasks: BackgroundTasks):
     """Histórico de precios por fondo. Sirve caché siempre; recalcula en background si no hay."""
     cached = load_json("history_batch.json")
     if cached:
-        return cached
+        return {"series": cached}
     # No cache — trigger background build and return empty
     background_tasks.add_task(run_analytics_pipeline, force_download=False)
-    return {}
+    return {"series": {}}
 
 
 @router.get("/details")
@@ -262,19 +287,442 @@ async def get_portfolio_correlation(background_tasks: BackgroundTasks):
 
 @router.post("/")
 async def add_fund(fund: FundBase, background_tasks: BackgroundTasks):
-    """Añade un fondo al portfolio (nota: con sistema FIFO, esto es informativo)."""
-    # Con el sistema FIFO basado en Excel, esta operación es limitada.
-    # Se mantiene por compatibilidad con el frontend pero se recomienda
-    # importar el Excel actualizado via /upload-orders.
+    """Añade una aportación manual al portfolio (siempre crea una nueva entrada).
+
+    Permite múltiples aportaciones al mismo fondo (mismo ISIN, distinta fecha/importe).
+    El tipo de activo se infiere automáticamente del nombre del fondo.
+    Si sólo se indica importe + fecha, se calcula automáticamente las participaciones
+    usando el NAV de esa fecha: participaciones = importe / NAV(fecha_compra).
+    Importes negativos representan ventas/reembolsos.
+    """
+    from ..services.persistence_service import get_persistence_service
+    from ..services.fund_classifier import classify_fund, is_index_fund
+    import pandas as _pd
+
+    isin = (fund.ISIN or "").strip().upper()
+    name = fund.Fondo or isin
+    capital_invertido = fund.Capital_Invertido  # can be negative (sale)
+    participaciones = fund.Participaciones
+    fecha_compra = fund.Fecha_Compra
+
+    if not isin:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Se requiere ISIN para añadir una posición.")
+
+    # ── Auto-detect tipo ──────────────────────────────────────────────────
+    raw_tipo = (fund.TIPO or "AUTO").strip().upper()
+    if raw_tipo in ("", "AUTO"):
+        tipo = "INDEX" if is_index_fund(name=name) else classify_fund(name=name).name
+    else:
+        tipo = raw_tipo
+
+    # ── Derive participaciones from importe / NAV(fecha) ─────────────────
+    # If participaciones not given but importe + fecha_compra are, look up
+    # the NAV on that date to compute how many units were bought/sold.
+    if participaciones is None and capital_invertido is not None and fecha_compra:
+        try:
+            from ..services.portfolio_service import get_portfolio_client
+            _client = get_portfolio_client()
+            _nav_df = _client.fund_nav_history(isin, years=15)
+            if _nav_df is not None and not _nav_df.empty:
+                _nav_df["date"] = _pd.to_datetime(_nav_df["date"])
+                target_date = _pd.Timestamp(fecha_compra)
+                # Find closest NAV date on or before target_date
+                _before = _nav_df[_nav_df["date"] <= target_date]
+                if _before.empty:
+                    _before = _nav_df  # fallback: use earliest available
+                nav_on_date = float(_before.sort_values("date").iloc[-1]["price"])
+                if nav_on_date > 0:
+                    participaciones = round(float(capital_invertido) / nav_on_date, 6)
+        except Exception as _e:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "add_fund: no se pudo calcular participaciones para %s en %s: %s",
+                isin, fecha_compra, _e,
+            )
+
+    svc = get_persistence_service()
+    position = svc.add_manual_position(
+        isin=isin,
+        name=name,
+        tipo=tipo,
+        capital_invertido=float(capital_invertido) if capital_invertido is not None else None,
+        participaciones=float(participaciones) if participaciones is not None else None,
+        fecha_compra=fecha_compra,
+    )
     background_tasks.add_task(run_analytics_pipeline, force_download=False)
-    return {"message": "✅ Recalculando portfolio. Para cambios permanentes, actualiza el Excel de órdenes."}
+    return {"message": f"✅ Aportación manual guardada para {isin}.", "position": position}
 
 
-@router.delete("/{isin_or_name}")
-async def delete_fund(isin_or_name: str, background_tasks: BackgroundTasks):
-    """Elimina un fondo (nota: con sistema FIFO, se recomienda actualizar el Excel)."""
+@router.delete("/manual/entry/{entry_id}")
+async def delete_manual_fund_entry(entry_id: int, background_tasks: BackgroundTasks):
+    """Elimina una aportación manual concreta por id."""
+    from ..services.persistence_service import get_persistence_service
+
+    svc = get_persistence_service()
+    deleted = svc.delete_manual_position_by_id(entry_id)
+    if not deleted:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Aportación manual {entry_id} no encontrada.")
     background_tasks.add_task(run_analytics_pipeline, force_download=False)
-    return {"message": "🗑️ Recalculando portfolio. Para cambios permanentes, actualiza el Excel de órdenes."}
+    return {"message": f"🗑️ Aportación manual {entry_id} eliminada."}
+
+
+@router.delete("/manual/{isin}")
+async def delete_manual_fund(isin: str, background_tasks: BackgroundTasks):
+    """Elimina TODAS las aportaciones manuales de un ISIN."""
+    from ..services.persistence_service import get_persistence_service
+
+    svc = get_persistence_service()
+    deleted = svc.delete_manual_position(isin.strip().upper())
+    if not deleted:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Posición manual {isin} no encontrada.")
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": f"🗑️ Posición manual {isin} eliminada."}
+
+
+@router.get("/manual-positions")
+async def list_manual_positions():
+    """Lista todas las posiciones manuales guardadas."""
+    from ..services.persistence_service import get_persistence_service
+    return get_persistence_service().list_manual_positions()
+
+
+# ── Transaction overrides ────────────────────────────────────────────────────
+
+@router.get("/transaction-overrides")
+async def list_transaction_overrides():
+    """Lista todos los overrides de transacciones con nombre de fondo e importe real."""
+    import pandas as _pd
+    from ..services.persistence_service import get_persistence_service
+
+    overrides = get_persistence_service().list_transaction_overrides()
+    if not overrides:
+        return []
+
+    client = get_portfolio_client()
+    movements = client.portfolio.movements
+
+    # ── Build ISIN → name map (same logic as /raw-movements) ─────────────────
+    name_map: dict = {}
+    for lot in client.portfolio.open_lots:
+        isin_k = str(lot.get("ISIN", "")).strip().upper()
+        fondo_k = str(lot.get("Fondo", "")).strip()
+        if isin_k and fondo_k and fondo_k != isin_k:
+            name_map[isin_k] = fondo_k
+    _summary = load_json("summary.json")
+    if _summary:
+        for f in _summary.get("funds", []):
+            isin_k = str(f.get("ISIN", "")).strip().upper()
+            fondo_k = str(f.get("Fondo", "")).strip()
+            if isin_k and fondo_k and fondo_k != isin_k:
+                name_map[isin_k] = fondo_k
+    _details = load_json("details.json")
+    if _details:
+        for fondo_k, meta in _details.items():
+            isin_k = str(meta.get("isin", "")).strip().upper()
+            if isin_k and fondo_k and fondo_k != isin_k and isin_k not in name_map:
+                name_map[isin_k] = fondo_k
+    # Also supplement from movements CSV Fondo column directly
+    if not movements.empty and "Fondo" in movements.columns:
+        for _, row in movements.iterrows():
+            isin_k = str(row.get("ISIN", "") or "").strip().upper()
+            fondo_k = str(row.get("Fondo", "") or "").strip()
+            if isin_k and fondo_k and fondo_k.lower() not in ("nan", "none", "") and fondo_k != isin_k and isin_k not in name_map:
+                name_map[isin_k] = fondo_k
+
+    # ── Resolve missing names via provider (covers historical funds no longer held) ──
+    override_isins = [str(ov.get("isin", "")).strip().upper() for ov in overrides]
+    missing_name_isins = [isin for isin in override_isins if isin and isin not in name_map]
+    if missing_name_isins:
+        try:
+            resolved = await client.provider.resolve_names_batch(missing_name_isins)
+            for isin_k, name_v in resolved.items():
+                if name_v and name_v != isin_k:
+                    name_map[isin_k] = name_v
+        except Exception as _resolve_err:
+            logger.warning("Could not resolve fund names for overrides: %s", _resolve_err)
+
+    enriched = []
+    for ov in overrides:
+        isin = str(ov.get("isin", "")).strip().upper()
+        fecha = str(ov.get("fecha", "")).strip()[:10]
+        fondo = name_map.get(isin) or isin
+
+        # Stored participaciones value (the corrected one); 0 means "auto-flip all positive"
+        stored_parts: float = float(ov.get("participaciones", 0))
+
+        # Look up the actual movement values (after overrides are applied to movements)
+        actual_participaciones: float | None = None
+        importe: float | None = None
+        if not movements.empty:
+            isin_norm = movements["ISIN"].str.strip().str.upper()
+            mask = (
+                (isin_norm == isin)
+                & (movements["Fecha"].dt.strftime("%Y-%m-%d") == fecha)
+            )
+            rows_for_ov = movements[mask]
+            if not rows_for_ov.empty:
+                actual_participaciones = float(rows_for_ov["Participaciones"].sum())
+                if "Importe" in rows_for_ov.columns:
+                    raw_imp = float(rows_for_ov["Importe"].abs().sum())
+                    # Sign based on actual (post-override) participaciones; fall back to stored sign
+                    is_negative = (
+                        actual_participaciones < 0
+                        if actual_participaciones is not None
+                        else stored_parts < 0
+                    )
+                    importe = -raw_imp if is_negative else raw_imp
+
+        # When movement rows not found, fall back to stored participaciones for display
+        if actual_participaciones is None and stored_parts != 0:
+            actual_participaciones = stored_parts
+
+        # Auto-assign note "Traspaso saliente" for overrides with negative participaciones
+        # that were saved without a note (backward compatibility)
+        notes = ov.get("notes") or ""
+        if not notes and stored_parts < 0:
+            notes = "Traspaso saliente"
+
+        enriched.append({
+            **ov,
+            "fondo": fondo,
+            "actual_participaciones": actual_participaciones,
+            "importe": importe,
+            "notes": notes,
+        })
+
+    return enriched
+
+
+@router.post("/transaction-overrides")
+async def upsert_transaction_override(body: dict, background_tasks: BackgroundTasks):
+    """Crea o actualiza un override de transacción.
+
+    Body: {isin, fecha (YYYY-MM-DD), participaciones (con signo correcto), notes?}
+    """
+    from ..services.persistence_service import get_persistence_service
+
+    isin = (body.get("isin") or "").strip().upper()
+    fecha = (body.get("fecha") or "").strip()
+    participaciones = body.get("participaciones")
+    notes = body.get("notes", "")
+
+    if not isin or not fecha or participaciones is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Se requieren isin, fecha y participaciones.")
+
+    svc = get_persistence_service()
+    override = svc.upsert_transaction_override(
+        isin=isin, fecha=fecha, participaciones=float(participaciones), notes=notes
+    )
+    # Forzar recarga del cliente para que el override surta efecto
+    from ..services.portfolio_service import reset_client
+    reset_client()
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": "✅ Override guardado.", "override": override}
+
+
+@router.delete("/transaction-overrides/{override_id}")
+async def delete_transaction_override(override_id: int, background_tasks: BackgroundTasks):
+    """Elimina un override de transacción por id."""
+    from ..services.persistence_service import get_persistence_service
+
+    svc = get_persistence_service()
+    deleted = svc.delete_transaction_override(override_id)
+    if not deleted:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Override {override_id} no encontrado.")
+    from ..services.portfolio_service import reset_client
+    reset_client()
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": f"🗑️ Override {override_id} eliminado."}
+
+
+@router.get("/raw-movements")
+async def get_raw_movements():
+    """Devuelve todas las transacciones cargadas (movimientos en bruto) del portfolio.
+
+    Unifica las tres fuentes: MyInvestor Fondos (TSV), MyInvestor ETFs (Excel)
+    y Trade Republic ETFs (CSV). Incluye nombres de fondo resueltos.
+
+    Returns:
+        Lista de dicts con: isin, fecha, participaciones, importe, tipo, fondo, fuente.
+        El importe lleva el mismo signo que participaciones.
+    """
+    import pandas as _pd
+
+    client = get_portfolio_client()
+    movements = client.portfolio.movements
+    if movements.empty:
+        return []
+
+    # Build ISIN → nombre from open lots (most reliable) + summary cache
+    name_map: dict = {}
+    for lot in client.portfolio.open_lots:
+        isin_k = str(lot.get("ISIN", "")).strip().upper()
+        fondo_k = str(lot.get("Fondo", "")).strip()
+        if isin_k and fondo_k and fondo_k != isin_k:
+            name_map[isin_k] = fondo_k
+    # Supplement with summary JSON cache (has prettier fund names)
+    _summary = load_json("summary.json")
+    if _summary:
+        for f in _summary.get("funds", []):
+            isin_k = str(f.get("ISIN", "")).strip().upper()
+            fondo_k = str(f.get("Fondo", "")).strip()
+            if isin_k and fondo_k:
+                name_map[isin_k] = fondo_k
+    # Supplement with details.json (covers closed/old funds not in open lots)
+    _details = load_json("details.json")
+    if _details:
+        for fondo_k, meta in _details.items():
+            isin_k = str(meta.get("isin", "")).strip().upper()
+            if isin_k and fondo_k and fondo_k != isin_k and isin_k not in name_map:
+                name_map[isin_k] = fondo_k
+
+    df = movements.copy()
+    df["Fecha"] = _pd.to_datetime(df["Fecha"]).dt.strftime("%Y-%m-%d")
+
+    if "Fuente" not in df.columns:
+        df["Fuente"] = "MyInvestor Fondos"
+    else:
+        df["Fuente"] = df["Fuente"].fillna("MyInvestor Fondos").replace("", "MyInvestor Fondos")
+
+    result = []
+    for _, row in df.iterrows():
+        isin = str(row.get("ISIN", "") or "").strip().upper()
+        partic = safe_float(row.get("Participaciones", 0))
+        importe_raw = safe_float(row.get("Importe", 0))
+        # Importe carries the same sign as participaciones
+        importe = -abs(importe_raw) if partic < 0 else abs(importe_raw)
+        # Resolve fund name: row Fondo, then name_map, then ISIN
+        fondo_row = str(row.get("Fondo", "") or "").strip()
+        if fondo_row.lower() in ("nan", "none", ""):
+            fondo_row = ""
+        fondo = name_map.get(isin) or (fondo_row if fondo_row and fondo_row != isin else "") or isin
+        result.append({
+            "isin": isin,
+            "fecha": str(row.get("Fecha", "") or "").strip(),
+            "participaciones": partic,
+            "importe": importe,
+            "tipo": str(row.get("Tipo", "") or "").strip(),
+            "fondo": fondo,
+            "fuente": str(row.get("Fuente", "") or "").strip(),
+        })
+
+    result.sort(key=lambda x: x["fecha"], reverse=True)
+
+    # Filter out excluded movements
+    from ..services.persistence_service import get_persistence_service
+    svc = get_persistence_service()
+    excluded = {(e["isin"], e["fecha"]) for e in svc.list_excluded_movements()}
+    if excluded:
+        result = [m for m in result if (m["isin"], m["fecha"]) not in excluded]
+
+    return result
+
+
+@router.delete("/raw-movements/{isin}/{fecha}")
+async def delete_raw_movement(isin: str, fecha: str, background_tasks: BackgroundTasks):
+    """Excluye un movimiento del portfolio y recalcula.
+
+    El movimiento queda oculto y excluido del cálculo FIFO.
+    Se puede restaurar vía POST /raw-movements/{isin}/{fecha}/restore.
+    """
+    from ..services.persistence_service import get_persistence_service
+    svc = get_persistence_service()
+    svc.exclude_movement(isin.upper().strip(), fecha.strip())
+    from ..services.portfolio_service import reset_client
+    reset_client()
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": f"🗑️ Movimiento {isin} / {fecha} excluido."}
+
+
+@router.get("/excluded-movements")
+async def list_excluded_movements():
+    """Devuelve todos los movimientos excluidos (borrados por el usuario).
+
+    Incluye información enriquecida del fondo (nombre, importe) cuando está disponible.
+    """
+    import pandas as _pd
+    from ..services.persistence_service import get_persistence_service
+    svc = get_persistence_service()
+    excluded = svc.list_excluded_movements()
+    if not excluded:
+        return []
+
+    # Try to enrich with fund name and amount from original movements
+    try:
+        client = get_portfolio_client()
+        # We need raw movements BEFORE filtering, so read from the original CSV source
+        # Since the client already filtered them out, we look at ALL movements from source
+        from ..services.portfolio_service import _get_orders_source, DATA_DIR
+        from ..services.core_portfolio import Portfolio
+        source = _get_orders_source()
+        if source:
+            temp_portfolio = Portfolio()
+            temp_portfolio.load_orders(source)
+            movements = temp_portfolio.movements
+        else:
+            movements = _pd.DataFrame()
+
+        name_map: dict = {}
+        _summary = load_json("summary.json")
+        if _summary:
+            for f in _summary.get("funds", []):
+                isin_k = str(f.get("ISIN", "")).strip().upper()
+                fondo_k = str(f.get("Fondo", "")).strip()
+                if isin_k and fondo_k:
+                    name_map[isin_k] = fondo_k
+
+        result = []
+        for ex in excluded:
+            isin = ex["isin"]
+            fecha = ex["fecha"]
+            fondo = name_map.get(isin, isin)
+            importe = None
+            participaciones = None
+            if not movements.empty:
+                mask = (
+                    (movements["ISIN"] == isin)
+                    & (movements["Fecha"].dt.strftime("%Y-%m-%d") == fecha)
+                )
+                if mask.any():
+                    row = movements.loc[mask].iloc[0]
+                    partic = safe_float(row.get("Participaciones", 0))
+                    imp_raw = safe_float(row.get("Importe", 0))
+                    importe = -abs(imp_raw) if partic < 0 else abs(imp_raw)
+                    participaciones = partic
+                    fondo_row = str(row.get("Fondo", "") or "").strip()
+                    if fondo_row and fondo_row.lower() not in ("nan", "none", "") and fondo_row != isin:
+                        fondo = fondo_row
+            result.append({
+                "isin": isin,
+                "fecha": fecha,
+                "fondo": fondo,
+                "importe": importe,
+                "participaciones": participaciones,
+            })
+        return result
+    except Exception:
+        # Fallback: return basic info without enrichment
+        return [{"isin": ex["isin"], "fecha": ex["fecha"], "fondo": ex["isin"], "importe": None, "participaciones": None} for ex in excluded]
+
+
+@router.post("/raw-movements/{isin}/{fecha}/restore")
+async def restore_raw_movement(isin: str, fecha: str, background_tasks: BackgroundTasks):
+    """Restaura un movimiento previamente excluido y recalcula el portfolio."""
+    from ..services.persistence_service import get_persistence_service
+    svc = get_persistence_service()
+    found = svc.unexclude_movement(isin.upper().strip(), fecha.strip())
+    if not found:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Exclusión no encontrada: {isin}/{fecha}")
+    from ..services.portfolio_service import reset_client
+    reset_client()
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": f"✅ Movimiento {isin} / {fecha} restaurado."}
 
 
 # =========================================================================
@@ -411,6 +859,7 @@ async def tax_optimize(request: TaxOptimizeRequest):
             Participaciones_Vendidas=safe_float(row.get("Participaciones_Vendidas", 0)),
             Importe_Retirado=safe_float(row.get("Importe_Retirado", 0)),
             Ganancia_Patrimonial=safe_float(row.get("Ganancia_Patrimonial", 0)),
+            es_etf=bool(row.get("es_etf", False)),
         ))
 
     # Use attrs set by client_async (more reliable than re-summing)
@@ -456,13 +905,67 @@ async def traspaso_analysis():
       venta definitiva.
     - Solo aplica a fondos de inversión registrados (CNMV/ESMA).
       No aplica a ETFs, acciones ni planes de pensiones.
+
+    Resultado cacheado 30 minutos para evitar llamadas repetidas a proveedores externos.
     """
+    # Serve from cache if fresh
+    now = _time.time()
+    cached = _traspaso_analysis_cache
+    if cached["data"] is not None and (now - cached["ts"]) < _TRASPASO_ANALYSIS_TTL:
+        return cached["data"]
+
     try:
         client = get_portfolio_client()
         items = await client.core.traspaso_analysis()
-        return [TraspasoFundItem(**item) for item in items]
+        result = [TraspasoFundItem(**item) for item in items]
+        # Only cache if we got meaningful results
+        if result:
+            _traspaso_analysis_cache["data"] = result
+            _traspaso_analysis_cache["ts"] = now
+        return result
     except Exception as exc:
+        # If we have stale cache, return it rather than an error
+        if cached["data"] is not None:
+            return cached["data"]
         raise HTTPException(status_code=500, detail=f"Error en análisis de traspasos: {exc}") from exc
+
+
+def _build_harvesting(raw: dict | None) -> LossHarvestingSuggestion | None:
+    """Build a LossHarvestingSuggestion from the raw dict returned by tax_calculator."""
+    if not raw:
+        return None
+    candidates = [
+        LossHarvestingCandidate(
+            ISIN=str(c.get("ISIN", "")),
+            Fondo=str(c.get("Fondo", "")),
+            es_etf=bool(c.get("es_etf", False)),
+            Fecha_Compra=(
+                c["Fecha_Compra"].strftime("%Y-%m-%d")
+                if hasattr(c.get("Fecha_Compra"), "strftime")
+                else str(c["Fecha_Compra"]) if c.get("Fecha_Compra") else None
+            ),
+            lot_loss=safe_float(c.get("lot_loss", 0)),
+            lot_value=safe_float(c.get("lot_value", 0)),
+            preceding_forced_gain=safe_float(c.get("preceding_forced_gain", 0)),
+            preceding_forced_value=safe_float(c.get("preceding_forced_value", 0)),
+            preceding_transfer_value=safe_float(c.get("preceding_transfer_value", 0)),
+            net_harvest_gain=safe_float(c.get("net_harvest_gain", 0)),
+            additional_cash=safe_float(c.get("additional_cash", 0)),
+            antiaplicacion_plazo=str(c.get("antiaplicacion_plazo", "")),
+        )
+        for c in raw.get("candidates", [])
+    ]
+    return LossHarvestingSuggestion(
+        direction=str(raw.get("direction", "none")),
+        candidates=candidates,
+        base_net_gain=safe_float(raw.get("base_net_gain", 0)),
+        base_tax=safe_float(raw.get("base_tax", 0)),
+        total_harvestable_loss=safe_float(raw.get("total_harvestable_loss", 0)),
+        net_gain_after_harvest=safe_float(raw.get("net_gain_after_harvest", 0)),
+        tax_after_harvest=safe_float(raw.get("tax_after_harvest", 0)),
+        tax_savings=safe_float(raw.get("tax_savings", 0)),
+        additional_cash=safe_float(raw.get("additional_cash", 0)),
+    )
 
 
 @router.post("/traspaso-optimize", response_model=TraspasoOptimizeResponse)
@@ -501,12 +1004,14 @@ async def traspaso_optimize(request: TraspasoOptimizeRequest):
                 Destination_Fondo=d.get("Destination_Fondo"),
                 Precio_Compra_Unitario=safe_float(d.get("Precio_Compra_Unitario", 0)),
                 Nota=d.get("Nota"),
+                es_etf=bool(d.get("es_etf", False)),
             )
 
         def _escenario(d: dict) -> EscenarioFiscal:
             return EscenarioFiscal(
                 ganancia_patrimonial=safe_float(d.get("ganancia_patrimonial", 0)),
                 impuesto=safe_float(d.get("impuesto", 0)),
+                withdrawn_amount=safe_float(d.get("withdrawn_amount", 0)),
                 neto_recibido=safe_float(d.get("neto_recibido", 0)),
                 detalle=[_lot(s) for s in d.get("detalle", [])],
             )
@@ -535,6 +1040,8 @@ async def traspaso_optimize(request: TraspasoOptimizeRequest):
             destination_fund=dest,
             destination_alternatives=result.get("destination_alternatives", []),
             portfolio_after=result.get("portfolio_after", []),
+            non_traspasable_isins=result.get("non_traspasable_isins", []),
+            loss_harvesting=_build_harvesting(result.get("loss_harvesting")),
             notas=result.get("notas", ""),
         )
     except Exception as exc:
@@ -561,6 +1068,7 @@ async def fund_search(q: str = "", limit: int = 20):
             name=r.get("name", ""),
             in_portfolio=r.get("in_portfolio", False),
             url=r.get("url"),
+            ticker=r.get("ticker"),
         )
         for r in results
     ]
@@ -735,14 +1243,22 @@ async def get_orders_summary():
 
 
 @router.get("/real-evolution")
-async def get_real_evolution(years: int = 20):
+async def get_real_evolution(years: int = 20, background_tasks: BackgroundTasks = None):
     """Evolución real del portfolio basada en órdenes (participaciones × NAV diarios).
 
     Distinto de /history_batch: cada inversión se contabiliza a partir de su fecha real
     de ejecución. Incluye fondos ya vendidos. Devuelve serie diaria y snapshots mensuales.
     """
+    # Serve from cache whenever available — avoids expensive computation on each request
+    cached = load_json("real_evolution.json")
+    if cached:
+        return cached
     try:
-        return build_real_portfolio_history(years=years)
+        result = build_real_portfolio_history(years=years)
+        # Persist so subsequent calls are instant
+        from ..services.portfolio_service import _save_json
+        _save_json("real_evolution.json", result)
+        return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error calculando evolución real: {exc}") from exc
 
@@ -814,15 +1330,28 @@ async def get_annual_returns():
     a fin de compararlo en igualdad de condiciones con años completos.
     Devuelve: ``{years, funds: {name: {year: pct, ...}, ...}, current_year}``.
     """
+    import time as _time
+    import os as _os
+
+    hb_path = CACHE_DIR / "history_batch.json"
+    ar_path = CACHE_DIR / "annual_returns.json"
+
+    # Serve from cache if fresher than history_batch
+    if ar_path.exists() and hb_path.exists():
+        if ar_path.stat().st_mtime >= hb_path.stat().st_mtime:
+            cached_ar = load_json("annual_returns.json")
+            if cached_ar:
+                return cached_ar
+
     cached = load_json("history_batch.json")
     if not cached:
         return {"years": [], "funds": {}, "current_year": None}
 
     from collections import defaultdict
     from datetime import datetime as _dt
+    from ..services.portfolio_service import _save_json
 
     current_year = _dt.now().year
-    today = _dt.now().date()
 
     result: dict[str, dict[int, float]] = {}
     all_years: set[int] = set()
@@ -873,7 +1402,9 @@ async def get_annual_returns():
             result[fund_name] = fund_returns
 
     years_sorted = sorted(all_years)
-    return {"years": years_sorted, "funds": result, "current_year": current_year}
+    response = {"years": years_sorted, "funds": result, "current_year": current_year}
+    _save_json("annual_returns.json", response)
+    return response
 
 
 @router.post("/upload-orders")
@@ -1080,6 +1611,8 @@ async def update_portfolio(portfolio_id: int, body: dict):
     )
     if not p:
         raise HTTPException(status_code=404, detail="Cartera no encontrada")
+    # Invalidate comparison cache since the portfolio changed
+    _compare_portfolios_cache.clear()
     return p
 
 
@@ -1089,6 +1622,7 @@ async def delete_portfolio(portfolio_id: int):
     ok = _persistence().delete_portfolio(portfolio_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Cartera no encontrada")
+    _compare_portfolios_cache.clear()
     return {"ok": True}
 
 
@@ -1114,19 +1648,69 @@ async def clone_current_portfolio(body: dict):
 async def compare_portfolios_endpoint(body: dict):
     """Compara dos carteras definidas por el usuario.
 
-    Body: {
-        portfolio_a: {name, funds: [{isin, name, weight}]},
-        portfolio_b: {name, funds: [{isin, name, weight}]},
-        years: int (default 5)
-    }
-    Devuelve métricas (CAGR, vol, Sharpe, maxDD) y series normalizadas
-    base 100 para cada cartera.
+    Body acepta dos formatos para portfolio_a / portfolio_b:
+    - Un ID numérico o string (se resuelve desde la BD; "current" para la cartera real).
+    - Un objeto {name, funds: [{isin, name, weight}]} para carteras ad-hoc.
+
+    Devuelve métricas (CAGR, vol, Sharpe, maxDD) y series normalizadas base 100.
     """
+    import json as _json
+    import hashlib as _hashlib
     import numpy as np
     from datetime import datetime, timedelta
 
-    pa = body.get("portfolio_a") or {}
-    pb = body.get("portfolio_b") or {}
+    # ── Cache lookup ──────────────────────────────────────────────────────────
+    try:
+        _cache_key = _hashlib.md5(
+            _json.dumps(body, sort_keys=True, default=str).encode()
+        ).hexdigest()
+    except Exception:
+        _cache_key = None
+
+    if _cache_key:
+        cached = _compare_portfolios_cache.get(_cache_key)
+        if cached and (_time.time() - cached["ts"]) < _COMPARE_PORTFOLIOS_TTL:
+            return cached["data"]
+
+    def _resolve_portfolio(raw) -> dict:
+        """Resolve a portfolio_a/b value to a {name, funds} dict."""
+        if isinstance(raw, dict):
+            return raw  # already a portfolio definition
+
+        ref = str(raw).strip()
+
+        # "current" → live positions
+        if ref == "current":
+            try:
+                pclient = get_portfolio_client()
+                df = pclient.positions(live=True)
+                total_v = df["Valor_Actual"].sum() if "Valor_Actual" in df.columns else 0
+                funds = []
+                for _, row in df.iterrows():
+                    val = row.get("Valor_Actual") or 0
+                    weight = float(val) / total_v if total_v > 0 else 0
+                    if weight > 0:
+                        funds.append({
+                            "isin": str(row.get("ISIN", "")),
+                            "name": str(row.get("Fondo", row.get("ISIN", ""))),
+                            "weight": round(weight, 6),
+                        })
+                return {"name": "Mi Cartera Actual", "funds": funds}
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Error resolviendo cartera actual: {exc}") from exc
+
+        # numeric ID → look up in persistence
+        try:
+            pid = int(ref)
+            p = _persistence().get_portfolio(pid)
+            if not p:
+                raise HTTPException(status_code=404, detail=f"Cartera {pid} no encontrada")
+            return {"name": p["name"], "funds": p.get("funds", [])}
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Referencia de cartera no válida: {ref!r}")
+
+    pa = _resolve_portfolio(body.get("portfolio_a") or {})
+    pb = _resolve_portfolio(body.get("portfolio_b") or {})
     years = int(body.get("years", 5))
 
     if not pa.get("funds") or not pb.get("funds"):
@@ -1162,24 +1746,9 @@ async def compare_portfolios_endpoint(body: dict):
                 continue
 
         if not fund_series:
-            return {"series": [], "metrics": None}
+            return {"series": [], "metrics": None, "fund_starts": {}}
 
         cutoff_str = cutoff.strftime("%Y-%m-%d")
-
-        # Find common date range
-        all_dates: set[str] = set()
-        for pts in fund_series.values():
-            for p in pts:
-                d = p.get("date")
-                if d is not None:
-                    d_str = str(d)[:10]
-                    if d_str >= cutoff_str:
-                        all_dates.add(d_str)
-
-        if not all_dates:
-            return {"series": [], "metrics": None}
-
-        sorted_dates = sorted(all_dates)
 
         # Build price map per ISIN (date -> price)
         price_map: dict[str, dict[str, float]] = {}
@@ -1189,7 +1758,6 @@ async def compare_portfolios_endpoint(body: dict):
                 d = p.get("date")
                 pr = p.get("price")
                 if d is not None and pr is not None:
-                    # Convert Timestamp or date to string
                     d_str = str(d)[:10]
                     try:
                         pm[d_str] = float(pr)
@@ -1197,29 +1765,57 @@ async def compare_portfolios_endpoint(body: dict):
                         pass
             price_map[isin] = pm
 
-        # Build weighted portfolio series
+        # Determine first available date per fund (>= cutoff)
+        fund_starts: dict[str, str] = {}
+        for isin, pm in price_map.items():
+            dates_in_range = sorted(d for d in pm if d >= cutoff_str)
+            if dates_in_range:
+                fund_starts[isin] = dates_in_range[0]
+
+        # The portfolio can only start when ALL funds have data
+        # Use the latest of all fund start dates as the common start
+        if not fund_starts:
+            return {"series": [], "metrics": None, "fund_starts": {}}
+
+        common_start = max(fund_starts.values())
+
+        # Collect all dates across funds from common_start onwards
+        all_dates: set[str] = set()
+        for pm in price_map.values():
+            for d in pm:
+                if d >= common_start:
+                    all_dates.add(d)
+
+        if not all_dates:
+            return {"series": [], "metrics": None, "fund_starts": fund_starts}
+
+        sorted_dates = sorted(all_dates)
+
+        # Build weighted portfolio series (no silent weight redistribution)
         portfolio_pts = []
         for d in sorted_dates:
-            w_total = 0.0
             w_price = 0.0
+            all_covered = True
             for f in funds:
                 isin = f.get("isin")
                 w = float(f.get("weight", 0)) / total_w
-                if isin in price_map:
-                    # Forward-fill: find nearest previous date
-                    p = price_map[isin].get(d)
-                    if p is None:
-                        # Find nearest previous
-                        prev = [dd for dd in price_map[isin] if dd <= d]
-                        p = price_map[isin][max(prev)] if prev else None
-                    if p and p > 0:
-                        w_price += p * w
-                        w_total += w
-            if w_total > 0.3 and w_price > 0:  # at least 30% weighted coverage
-                portfolio_pts.append({"date": d, "price": round(w_price / w_total, 6)})
+                if isin not in price_map:
+                    continue  # fund had no data at all, skip
+                pm = price_map[isin]
+                p = pm.get(d)
+                if p is None:
+                    # Forward-fill within the common window
+                    prev = [dd for dd in pm if dd <= d and dd >= common_start]
+                    p = pm[max(prev)] if prev else None
+                if p and p > 0:
+                    w_price += p * w
+                else:
+                    all_covered = False
+            if w_price > 0:
+                portfolio_pts.append({"date": d, "price": round(w_price, 6)})
 
         if len(portfolio_pts) < 5:
-            return {"series": portfolio_pts, "metrics": None}
+            return {"series": portfolio_pts, "metrics": None, "fund_starts": fund_starts, "data_start": common_start}
 
         # Normalize to base 100
         base = portfolio_pts[0]["price"]
@@ -1256,33 +1852,98 @@ async def compare_portfolios_endpoint(body: dict):
             "max_dd": round(max_dd * 100, 2),
             "days": days,
         }
-        return {"series": normalized, "metrics": metrics}
+        return {"series": normalized, "metrics": metrics, "fund_starts": fund_starts, "data_start": common_start}
 
     # Build both
     result_a = await _build_portfolio_series(pa)
     result_b = await _build_portfolio_series(pb)
 
-    # Fund overlap
-    isins_a = {f["isin"] for f in pa.get("funds", []) if f.get("isin")}
-    isins_b = {f["isin"] for f in pb.get("funds", []) if f.get("isin")}
+    name_a = pa.get("name", "Cartera A")
+    name_b = pb.get("name", "Cartera B")
+
+    def _norm_metrics(m: dict | None) -> dict:
+        if not m:
+            return {}
+        return {
+            "total_return": m.get("total_return", 0) / 100,
+            "ann_return": m.get("ann_return", 0) / 100,
+            "volatility": (m.get("vol") or 0) / 100,
+            "sharpe": m.get("sharpe") or 0,
+            "max_drawdown": (m.get("max_dd") or 0) / 100,
+        }
+
+    # History keyed by portfolio name (date → price)
+    history: dict[str, list] = {
+        name_a: result_a["series"],
+        name_b: result_b["series"],
+    }
+    metrics = {
+        name_a: _norm_metrics(result_a["metrics"]),
+        name_b: _norm_metrics(result_b["metrics"]),
+    }
+
+    # Fund weight comparison (funds present in both)
+    weight_map_a = {f["isin"]: (f, float(f.get("weight", 0))) for f in pa.get("funds", []) if f.get("isin")}
+    weight_map_b = {f["isin"]: (f, float(f.get("weight", 0))) for f in pb.get("funds", []) if f.get("isin")}
+    isins_a = set(weight_map_a)
+    isins_b = set(weight_map_b)
     overlap = isins_a & isins_b
 
-    return {
-        "portfolio_a": {
-            "name": pa.get("name", "Cartera A"),
-            "series": result_a["series"],
-            "metrics": result_a["metrics"],
-            "funds": pa.get("funds", []),
-        },
-        "portfolio_b": {
-            "name": pb.get("name", "Cartera B"),
-            "series": result_b["series"],
-            "metrics": result_b["metrics"],
-            "funds": pb.get("funds", []),
-        },
-        "overlap_isins": list(overlap),
+    # Normalize weights to fractions
+    total_w_a = sum(v for _, v in weight_map_a.values()) or 1
+    total_w_b = sum(v for _, v in weight_map_b.values()) or 1
+
+    weight_comparison = []
+    all_isins = isins_a | isins_b
+    for isin in sorted(all_isins):
+        fa = weight_map_a.get(isin)
+        fb = weight_map_b.get(isin)
+        if fa is None and fb is None:
+            continue
+        fund_name = (fa[0] if fa else fb[0]).get("name") or isin
+        weight_comparison.append({
+            "fund": fund_name,
+            "isin": isin,
+            "weight_a": round((fa[1] / total_w_a) if fa else 0, 4),
+            "weight_b": round((fb[1] / total_w_b) if fb else 0, 4),
+            "in_both": isin in overlap,
+        })
+    weight_comparison.sort(key=lambda x: max(x["weight_a"], x["weight_b"]), reverse=True)
+
+    # Map ISINs to fund names for legible fund_starts warnings
+    isin_name_map: dict[str, str] = {}
+    for f in pa.get("funds", []) + pb.get("funds", []):
+        if f.get("isin") and f.get("name"):
+            isin_name_map[f["isin"]] = f["name"]
+
+    def _named_starts(fund_starts: dict[str, str]) -> list[dict]:
+        return sorted(
+            [{"isin": isin, "name": isin_name_map.get(isin, isin), "first_date": d}
+             for isin, d in fund_starts.items()],
+            key=lambda x: x["first_date"],
+        )
+
+    result = {
+        "history": history,
+        "metrics": metrics,
+        "weight_comparison": weight_comparison,
         "overlap_count": len(overlap),
+        # Per-portfolio availability metadata so the frontend can warn the user
+        "availability": {
+            name_a: {
+                "data_start": result_a.get("data_start"),
+                "fund_starts": _named_starts(result_a.get("fund_starts", {})),
+            },
+            name_b: {
+                "data_start": result_b.get("data_start"),
+                "fund_starts": _named_starts(result_b.get("fund_starts", {})),
+            },
+        },
     }
+    # Store in cache
+    if _cache_key:
+        _compare_portfolios_cache[_cache_key] = {"data": result, "ts": _time.time()}
+    return result
 
 
 # ── Favorites ──────────────────────────────────────────────────────────────
@@ -1334,4 +1995,211 @@ async def enrich_funds(isins: list[str]):
 
     client = get_portfolio_client()
     return await enrich_funds_batch(client, isins)
+
+
+# ── Data Providers Status ────────────────────────────────────────────────────
+
+@router.get("/providers-status")
+async def get_providers_status():
+    """Devuelve el estado de los proveedores de datos para cada ISIN del portfolio.
+
+    Para cada ISIN, informa:
+    - Número de filas de historial disponibles en caché (por proveedor y combinado)
+    - Rango de fechas del historial disponible
+    - Si el dato es fresco (< 3 días)
+    - El nombre del fondo
+    """
+    import asyncio as _aio
+    import time as _t
+    from ..services.cache_store import CacheStore
+    import pandas as _pd
+
+    client = get_portfolio_client()
+    cache: CacheStore = client.provider._cache
+
+    # Collect all ISINs ever traded plus current holdings
+    movements = client.portfolio.movements
+    all_isins_raw: list[str] = []
+    if not movements.empty and "ISIN" in movements.columns:
+        all_isins_raw = [str(i).strip().upper() for i in movements["ISIN"].dropna().unique()]
+
+    # Add canonical ISINs too
+    from ..services.portfolio_service import get_canonical_isin as _canonical
+    canonical_map = {isin: _canonical(isin) for isin in all_isins_raw}
+    all_isins = list(set(all_isins_raw) | set(canonical_map.values()))
+
+    # Build name map
+    name_map: dict = {}
+    _sum = load_json("summary.json")
+    if _sum:
+        for f in _sum.get("funds", []):
+            isin_k = str(f.get("ISIN", "")).strip().upper()
+            fondo_k = str(f.get("Fondo", "") or f.get("Morningstar Name", "")).strip()
+            if isin_k and fondo_k:
+                name_map[isin_k] = fondo_k
+    if not movements.empty and "Fondo" in movements.columns:
+        for _, row in movements.iterrows():
+            isin_k = str(row.get("ISIN", "") or "").strip().upper()
+            fondo_k = str(row.get("Fondo", "") or "").strip()
+            if isin_k and fondo_k and fondo_k.lower() not in ("nan", "none", "") and fondo_k != isin_k and isin_k not in name_map:
+                name_map[isin_k] = fondo_k
+
+    # Resolve remaining names via provider (cached names)
+    missing = [i for i in all_isins if i not in name_map]
+    if missing:
+        try:
+            resolved = await client.provider.resolve_names_batch(missing)
+            name_map.update({k: v for k, v in resolved.items() if v and v != k})
+        except Exception:
+            pass
+
+    _YEARS = 30  # match the default in build_real_portfolio_history
+
+    async def _check_isin(isin: str) -> dict:
+        """Check cached NAV history and per-provider availability for one ISIN."""
+        cache_key = CacheStore.nav_history_key(isin, _YEARS)
+        cached = await cache.aget(cache_key)
+        stale = await cache.aget_stale(cache_key)
+
+        is_fresh = cached is not None
+        rows_total = 0
+        first_date = None
+        last_date = None
+        source = cached or stale
+        if source:
+            try:
+                df = _pd.DataFrame(source)
+                df["date"] = _pd.to_datetime(df["date"])
+                df = df.sort_values("date")
+                rows_total = len(df)
+                first_date = df["date"].iloc[0].strftime("%Y-%m-%d") if rows_total > 0 else None
+                last_date = df["date"].iloc[-1].strftime("%Y-%m-%d") if rows_total > 0 else None
+            except Exception:
+                pass
+
+        # Load per-provider source metadata (stored by CompositeAsyncProvider)
+        sources_key = CacheStore.nav_history_sources_key(isin, _YEARS)
+        sources_meta: dict = await cache.aget(sources_key) or await cache.aget_stale(sources_key) or {}
+
+        return {
+            "isin": isin,
+            "name": name_map.get(isin, isin),
+            "canonical": canonical_map.get(isin, isin),
+            "rows": rows_total,
+            "first_date": first_date,
+            "last_date": last_date,
+            "is_fresh": is_fresh,
+            "is_stale": not is_fresh and stale is not None,
+            "no_data": rows_total == 0,
+            "providers": sources_meta,  # {Finect: 1234, YahooFinance: 1000, FMP: 0}
+        }
+
+    results = await _aio.gather(*[_check_isin(isin) for isin in all_isins])
+
+    # Group raw ISINs by canonical (merge share classes)
+    canonical_groups: dict = {}
+    for r in results:
+        can = r["canonical"]
+        if can not in canonical_groups:
+            canonical_groups[can] = r.copy()
+            canonical_groups[can]["raw_isins"] = [r["isin"]]
+            canonical_groups[can]["name"] = name_map.get(can, r["name"])
+        else:
+            # Merge: keep the entry with the most rows
+            canonical_groups[can]["raw_isins"].append(r["isin"])
+            if r["rows"] > canonical_groups[can]["rows"]:
+                canonical_groups[can]["rows"] = r["rows"]
+                canonical_groups[can]["first_date"] = r["first_date"]
+                canonical_groups[can]["last_date"] = r["last_date"]
+                canonical_groups[can]["is_fresh"] = r["is_fresh"]
+            if r["is_fresh"]:
+                canonical_groups[can]["is_fresh"] = True
+            canonical_groups[can]["no_data"] = canonical_groups[can]["rows"] == 0
+
+    return {"providers": list(canonical_groups.values())}
+
+
+@router.post("/providers-status/refresh/{isin}")
+async def refresh_provider_for_isin(isin: str, background_tasks: BackgroundTasks):
+    """Limpia la caché del historial NAV para un ISIN y fuerza re-descarga."""
+    from ..services.cache_store import CacheStore
+
+    isin = isin.strip().upper()
+    client = get_portfolio_client()
+    cache: CacheStore = client.provider._cache
+
+    # Delete all year-variants of the history cache for this ISIN
+    for years_key in [20, 30]:
+        key = CacheStore.nav_history_key(isin, years_key)
+        cache.delete(key)
+        sources_key = CacheStore.nav_history_sources_key(isin, years_key)
+        cache.delete(sources_key)
+
+    # Also clear fund info cache to get fresh name
+    cache.delete(CacheStore.fund_info_key(isin))
+    cache.delete(CacheStore.name_key(isin))
+
+    # Trigger re-download in background
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+    return {"message": f"✅ Caché eliminada para {isin}. Recalculando en segundo plano…"}
+
+
+@router.post("/providers-status/refresh/{isin}/provider/{provider}")
+async def refresh_provider_for_isin_with_choice(
+    isin: str,
+    provider: str,
+    background_tasks: BackgroundTasks,
+):
+    """Fuerza re-descarga del historial NAV para un ISIN usando un proveedor concreto.
+
+    provider: finect | yahoo | fmp
+    """
+    import asyncio as _aio
+    from ..services.cache_store import CacheStore
+    from ..services.data_providers import (
+        FinectAsyncProvider,
+        YFinanceAsyncProvider,
+        FMPAsyncProvider,
+    )
+
+    isin = isin.strip().upper()
+    provider = provider.strip().lower()
+
+    client = get_portfolio_client()
+    cache: CacheStore = client.provider._cache
+
+    _YEARS = 30
+
+    async def _do_download():
+        p_map = {
+            "finect": FinectAsyncProvider(cache),
+            "yahoo": YFinanceAsyncProvider(),
+            "fmp": FMPAsyncProvider(),
+        }
+        chosen = p_map.get(provider)
+        if chosen is None:
+            return
+
+        try:
+            import pandas as _pd
+            df = await chosen.get_nav_history(isin, years=_YEARS)
+            if df is None or df.empty:
+                return
+            df = df.copy()
+            df["date"] = _pd.to_datetime(df["date"]).dt.tz_localize(None).dt.strftime("%Y-%m-%d")
+            cache_key = CacheStore.nav_history_key(isin, _YEARS)
+            from ..services.cache_store import TTL_NAV_HISTORY
+            await cache.aset(cache_key, df[["date", "price"]].to_dict(orient="records"), TTL_NAV_HISTORY)
+            # Update sources metadata  
+            sources_key = CacheStore.nav_history_sources_key(isin, _YEARS)
+            label_map = {"finect": "Finect", "yahoo": "YahooFinance", "fmp": "FMP"}
+            existing: dict = await cache.aget(sources_key) or {}
+            existing[label_map[provider]] = len(df)
+            await cache.aset(sources_key, existing, TTL_NAV_HISTORY)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("refresh_with_choice(%s, %s) failed: %s", isin, provider, exc)
+
+    background_tasks.add_task(_do_download)
+    return {"message": f"✅ Descarga iniciada para {isin} desde {provider}. Los datos estarán disponibles en breve."}
 

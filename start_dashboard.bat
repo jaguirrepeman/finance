@@ -3,13 +3,27 @@ echo ==========================================================
 echo INICIANDO PORTFOLIO TRACKER DASHBOARD
 echo ==========================================================
 echo.
-echo Verificando dependencias del servidor...
+
+echo [1/4] Verificando dependencias del backend...
 cd backend
-call poetry install
+call poetry install --only main
+cd ..
 
 echo.
-echo Levantando el Motor de Datos (FastAPI)...
+echo [2/4] Instalando dependencias del frontend...
+cd frontend
+call npm.cmd install --silent
+echo.
+
+echo [3/4] Construyendo el frontend (Vite)...
+call npm.cmd run build
+cd ..
+
+echo.
+echo [4/4] Levantando el Motor de Datos (FastAPI)...
+cd backend
 start cmd /k "poetry run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+cd ..
 
 echo.
 echo Esperando a que el servidor despierte...
