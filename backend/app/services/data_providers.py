@@ -722,15 +722,126 @@ class FTAsyncProvider(AsyncFundDataProvider):
 
 
 class YFinanceAsyncProvider(AsyncFundDataProvider):
-    """Wrapper async sobre yfinance (sync) usando asyncio.to_thread."""
+    """Wrapper async sobre yfinance (sync) usando asyncio.to_thread.
+
+    REGLAS ESTRICTAS:
+    - Solo se usan exchanges con precios nativamenteen EUR (no GBp, no USD).
+    - Nunca se hace conversión de divisa — si el único ticker disponible no es
+      en EUR, yfinance devuelve vacío y el CompositeProvider usa Finect o FMP.
+    - La resolución elige el ticker EUR con mayor densidad de datos diarios
+      (≥ 30 filas en 60 días) en lugar del primero por orden de sufijo.
+    """
+
+    # Yahoo exchange suffixes cuya divisa es EUR nativa.
+    # .SW = SIX Swiss Exchange (CHF) — EXCLUIDO porque cotiza en CHF, no EUR.
+    # .L  = London Stock Exchange (GBp) — EXCLUIDO.
+    # Solo incluimos exchanges de la zona euro o que cotizan en EUR.
+    _EUR_SUFFIXES: tuple[str, ...] = (
+        ".AS",   # Euronext Amsterdam  (EUR)
+        ".MI",   # Borsa Italiana      (EUR)
+        ".PA",   # Euronext Paris      (EUR)
+        ".BR",   # Euronext Brussels   (EUR)
+        ".LS",   # Euronext Lisbon     (EUR)
+        ".DE",   # XETRA               (EUR)
+        ".F",    # Frankfurt           (EUR)
+        ".EXS",  # XETRA alt suffix    (EUR)
+        ".SG",   # Stuttgart (EUR, though sometimes sparse)
+    )
+
+    # Minimum trading-day rows in 60 days to qualify as "daily" (vs weekly ≃ 8–9)
+    _MIN_DAILY_ROWS_60D = 30
 
     def __init__(self) -> None:
         self._last_nav_dates: Dict[str, str] = {}
+        self._ticker_cache: Dict[str, str] = {}   # isin → resolved Yahoo ticker
+
+    @staticmethod
+    def _data_row_count_60d(sym: str) -> int:
+        """Return how many rows yfinance returns for *sym* in the last 60 days."""
+        try:
+            import yfinance as yf
+            t = yf.Ticker(sym)
+            h = t.history(period="60d")
+            if h is None or h.empty:
+                return 0
+            return len(h)
+        except Exception:
+            return 0
+
+    def _eur_candidates(self, quotes: list) -> list[str]:
+        """Return only EUR-denominated candidates, ranked by suffix preference.
+
+        Non-EUR exchanges (.L, .US, .SW etc.) are completely ignored.
+        """
+        ranked: list[str] = []
+        for suffix in self._EUR_SUFFIXES:
+            for q in quotes:
+                sym = q.get("symbol", "")
+                if sym.endswith(suffix) and sym not in ranked:
+                    ranked.append(sym)
+        return ranked
+
+    async def _resolve_ticker(self, isin: str) -> str:
+        """Return the best EUR-denominated Yahoo Finance ticker for *isin*.
+
+        Resolution strategy:
+        1. Search Yahoo Finance for all candidates.
+        2. Filter to EUR-only exchanges (_EUR_SUFFIXES).
+        3. Among EUR candidates, pick the one with the highest 60-day row count
+           (most daily observations).  Cache and return it.
+        4. If no EUR candidate is found, return empty string so the provider
+           returns an empty DataFrame (Finect/FMP will cover the ISIN instead).
+        """
+        if isin in self._ticker_cache:
+            return self._ticker_cache[isin]
+
+        resp = await fetch_with_retry(
+            f"https://query2.finance.yahoo.com/v1/finance/search?q={isin}&quotesCount=10&newsCount=0",
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+        )
+
+        candidates: list[str] = []
+        if resp is not None:
+            try:
+                quotes = resp.json().get("quotes") or []
+                candidates = self._eur_candidates(quotes)
+            except Exception as exc:
+                logger.debug("YFinance: ticker search failed for %s: %s", isin, exc)
+
+        if not candidates:
+            # No EUR listing found — yfinance cannot help for this ISIN
+            logger.debug("YFinance: no EUR-listed ticker for %s — skipping", isin)
+            self._ticker_cache[isin] = ""
+            return ""
+
+        # Among EUR candidates, pick the one with the most daily observations
+        best_sym = ""
+        best_rows = 0
+        for sym in candidates[:8]:
+            rows = await asyncio.to_thread(self._data_row_count_60d, sym)
+            logger.debug("YFinance: %s → %s: %d rows/60d (EUR)", isin, sym, rows)
+            if rows > best_rows:
+                best_rows = rows
+                best_sym = sym
+            if rows >= self._MIN_DAILY_ROWS_60D:
+                break  # Good enough — no need to check more
+
+        if best_sym:
+            logger.info("YFinance: resolved %s → %s (%d rows/60d, EUR)", isin, best_sym, best_rows)
+        else:
+            logger.debug("YFinance: no data from any EUR ticker for %s", isin)
+
+        self._ticker_cache[isin] = best_sym
+        return best_sym
 
     async def get_nav(self, isin: str) -> Optional[float]:
+        ticker_sym = await self._resolve_ticker(isin)
+        if not ticker_sym:
+            return None
+
         def _sync():
             import yfinance as yf
-            ticker = yf.Ticker(isin)
+            ticker = yf.Ticker(ticker_sym)
             hist = ticker.history(period="5d")
             if hist is not None and not hist.empty:
                 last_idx = hist.index[-1]
@@ -739,24 +850,11 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
                 except AttributeError:
                     date_str = str(last_idx)[:10]
                 self._last_nav_dates[isin] = date_str
-                price = float(hist["Close"].iloc[-1])
-                currency = ticker.info.get("currency", "EUR") if ticker.info else "EUR"
-                if currency == "USD":
-                    fx = yf.Ticker("USDEUR=X")
-                    fx_hist = fx.history(period="2d")
-                    if fx_hist is not None and not fx_hist.empty:
-                        price = price * float(fx_hist["Close"].iloc[-1])
-                elif currency == "GBp":
-                    # London-listed prices quoted in pence — convert to GBP then EUR
-                    fx_gbp = yf.Ticker("GBPEUR=X")
-                    fx_hist = fx_gbp.history(period="2d")
-                    if fx_hist is not None and not fx_hist.empty:
-                        price = (price / 100.0) * float(fx_hist["Close"].iloc[-1])
-                return price
+                # Ticker is already EUR-denominated — no FX conversion needed
+                return float(hist["Close"].iloc[-1])
             return None
 
         try:
-            # Timeout de 10 s para evitar cuelgues en tickers delisted o lentos
             return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=10.0)
         except (asyncio.TimeoutError, Exception) as e:
             logger.debug("YFinanceAsync.get_nav(%s) failed: %s", isin, e)
@@ -766,13 +864,15 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
         return self._last_nav_dates.get(isin)
 
     async def get_nav_history(self, isin: str, years: int = 5) -> pd.DataFrame:
-        def _sync():
+        ticker_sym = await self._resolve_ticker(isin)
+        if not ticker_sym:
+            return pd.DataFrame(columns=["date", "price"])
+
+        def _sync() -> pd.DataFrame:
             import yfinance as yf
             from datetime import datetime, timedelta
-            # Use start date instead of period string to support arbitrary years;
-            # yfinance handles long date ranges more reliably than period strings > 10y.
             start_dt = (datetime.now() - timedelta(days=int(years) * 365)).strftime("%Y-%m-%d")
-            ticker = yf.Ticker(isin)
+            ticker = yf.Ticker(ticker_sym)
             hist = ticker.history(start=start_dt)
             if hist is None or hist.empty:
                 return pd.DataFrame(columns=["date", "price"])
@@ -780,32 +880,7 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
                 columns={"Date": "date", "Close": "price"}
             )
             df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-            # Convert USD/GBp prices to EUR
-            currency = ticker.info.get("currency", "EUR") if ticker.info else "EUR"
-            if currency == "USD":
-                fx = yf.Ticker("USDEUR=X")
-                fx_hist = fx.history(start=start_dt)
-                if fx_hist is not None and not fx_hist.empty:
-                    fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
-                        columns={"Date": "date", "Close": "fx"}
-                    )
-                    fx_df["date"] = pd.to_datetime(fx_df["date"]).dt.tz_localize(None)
-                    df = df.merge(fx_df, on="date", how="left")
-                    df["fx"] = df["fx"].ffill().bfill()
-                    df["price"] = df["price"] * df["fx"]
-                    df = df.drop(columns=["fx"])
-            elif currency == "GBp":
-                fx = yf.Ticker("GBPEUR=X")
-                fx_hist = fx.history(start=start_dt)
-                if fx_hist is not None and not fx_hist.empty:
-                    fx_df = fx_hist.reset_index()[["Date", "Close"]].rename(
-                        columns={"Date": "date", "Close": "fx"}
-                    )
-                    fx_df["date"] = pd.to_datetime(fx_df["date"]).dt.tz_localize(None)
-                    df = df.merge(fx_df, on="date", how="left")
-                    df["fx"] = df["fx"].ffill().bfill()
-                    df["price"] = (df["price"] / 100.0) * df["fx"]
-                    df = df.drop(columns=["fx"])
+            # Ticker is already EUR-denominated — no FX conversion needed or allowed
             return df.reset_index(drop=True)
 
         try:
@@ -815,9 +890,13 @@ class YFinanceAsyncProvider(AsyncFundDataProvider):
             return pd.DataFrame(columns=["date", "price"])
 
     async def get_fund_info(self, isin: str) -> Dict[str, Any]:
+        ticker_sym = await self._resolve_ticker(isin)
+        if not ticker_sym:
+            return {}
+
         def _sync():
             import yfinance as yf
-            ticker = yf.Ticker(isin)
+            ticker = yf.Ticker(ticker_sym)
             info = ticker.info or {}
             return {
                 "name": info.get("longName", info.get("shortName", isin)),
@@ -1265,11 +1344,37 @@ class CompositeAsyncProvider:
         if len(non_empty) == 1:
             result = non_empty[0]
         else:
-            # Merge: concatenar en orden de prioridad (finect → yf → fmp).
-            # keep="first" → el primer proveedor de la cadena gana en fechas solapadas,
-            # garantizando que los precios de finect/yf (ya en EUR) tengan prioridad
-            # sobre FMP que puede devolver precios en USD sin convertir.
-            combined = pd.concat(non_empty).drop_duplicates(subset="date", keep="first")
+            # ── density-aware merge ──────────────────────────────────────────
+            # Compute average inter-row gap in days for each provider result.
+            # A daily series has gap ≈ 1 day; a weekly series has gap ≈ 7 days.
+            # We sort providers by ascending gap so the densest (most daily)
+            # result has priority in the dedup merge.
+            def _avg_gap_days(df: pd.DataFrame) -> float:
+                if len(df) < 2:
+                    return 999.0
+                dates = pd.to_datetime(df["date"]).sort_values()
+                gaps = dates.diff().dropna().dt.days
+                return float(gaps.mean()) if len(gaps) > 0 else 999.0
+
+            # Label non-empty results with their source for logging
+            labelled = list(zip([_avg_gap_days(r) for r in non_empty], non_empty))
+            labelled.sort(key=lambda x: x[0])  # ascending: daily first
+
+            densest_gap, densest_df = labelled[0]
+            if densest_gap <= 4.0:  # clearly daily
+                logger.debug(
+                    "get_nav_history(%s): densest source has gap=%.1f days (%d rows), using as base",
+                    isin, densest_gap, len(densest_df),
+                )
+            else:
+                logger.warning(
+                    "get_nav_history(%s): no daily source found, best gap=%.1f days (%d rows)",
+                    isin, densest_gap, len(densest_df),
+                )
+
+            # Merge in order densest → sparser; densest wins where dates overlap.
+            ordered = [df for _, df in labelled]
+            combined = pd.concat(ordered).drop_duplicates(subset="date", keep="first")
             result = combined.sort_values("date").reset_index(drop=True)
 
         # Stale-while-revalidate: if fresh result is much smaller than stale cache,

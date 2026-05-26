@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Briefcase, BarChart2, ArrowLeftRight, ClipboardList, Plus } from "lucide-react";
 import { FundSearchInput, Spinner } from "@/components/ui";
 import { fmtEur } from "@/lib/format";
 import { usePositions, useRebalance } from "../hooks";
@@ -104,8 +105,9 @@ export function RebalancearSubTab() {
     <div className="space-y-6">
       {/* Current positions */}
       <div className="glass-panel overflow-x-auto p-5">
-        <h4 className="mb-3 text-sm font-semibold">
-          💼 Posiciones Actuales
+        <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+          <Briefcase className="size-4 text-accent-glow" />
+          Posiciones Actuales
         </h4>
         <table className="w-full text-sm">
           <thead>
@@ -143,7 +145,7 @@ export function RebalancearSubTab() {
 
       {/* Transfer planner */}
       <div className="glass-panel space-y-4 p-5">
-        <h4 className="text-sm font-semibold">🔄 Planificar Traspasos</h4>
+        <h4 className="flex items-center gap-2 text-sm font-semibold"><ArrowLeftRight className="size-4 text-accent-glow" /> Planificar Traspasos</h4>
 
         <div className="flex flex-wrap items-end gap-3">
           <div>
@@ -190,6 +192,7 @@ export function RebalancearSubTab() {
                 onSelect={handleSelectNewFund}
                 portfolioIsins={portfolioIsins}
                 favoriteIsins={favoriteIsins}
+                favoritesData={favorites ?? []}
               />
             )}
           </div>
@@ -220,8 +223,9 @@ export function RebalancearSubTab() {
       {/* Planned transfers list */}
       {transfers.length > 0 && (
         <div className="glass-panel p-5">
-          <h4 className="mb-3 text-sm font-semibold">
-            📋 Traspasos Planificados
+          <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <ClipboardList className="size-4 text-accent-glow" />
+            Traspasos Planificados
           </h4>
           <div className="space-y-2">
             {transfers.map((t) => (
@@ -251,8 +255,9 @@ export function RebalancearSubTab() {
 
       {/* Standalone adds */}
       <div className="glass-panel space-y-3 p-5">
-        <h4 className="text-sm font-semibold">
-          ➕ Aportaciones Adicionales
+        <h4 className="flex items-center gap-2 text-sm font-semibold">
+          <Plus className="size-4 text-accent-glow" />
+          Aportaciones Adicionales
         </h4>
         <div className="flex items-end gap-3">
           <div className="flex-1">
@@ -260,6 +265,7 @@ export function RebalancearSubTab() {
               onSelect={handleAddStandalone}
               portfolioIsins={portfolioIsins}
               favoriteIsins={favoriteIsins}
+              favoritesData={favorites ?? []}
             />
           </div>
           <div>
@@ -316,8 +322,9 @@ export function RebalancearSubTab() {
       {/* Results */}
       {result?.positions_after && (
         <div className="glass-panel overflow-x-auto p-5">
-          <h4 className="mb-3 text-sm font-semibold">
-            📊 Resultado del Rebalanceo
+          <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <BarChart2 className="size-4 text-accent-glow" />
+            Resultado del Rebalanceo
           </h4>
           <table className="w-full text-sm">
             <thead>

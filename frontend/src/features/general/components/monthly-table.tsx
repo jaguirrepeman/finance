@@ -1,4 +1,5 @@
 import type { MonthlyData } from "@/types";
+import { Calendar } from "lucide-react";
 import { fmtEur, fmtPct, signColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -12,7 +13,7 @@ export function MonthlyTable({ monthly }: MonthlyTableProps) {
 
   return (
     <div className="glass-panel overflow-x-auto p-5">
-      <h4 className="mb-1 text-sm font-semibold">📅 Resumen Mensual</h4>
+      <h4 className="mb-1 flex items-center gap-2 text-sm font-semibold"><Calendar className="size-4 text-accent-glow" /> Resumen Mensual</h4>
       <p className="mb-3 text-xs text-text-secondary">
         <strong className="text-text-primary">MoM</strong> = cambio del{" "}
         <strong className="text-text-primary">patrimonio</strong> respecto al

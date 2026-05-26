@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { TrendingUp, SlidersHorizontal } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -141,7 +142,7 @@ export function ProyeccionSubTab() {
     <div className="space-y-6">
       {/* Controls */}
       <div className="glass-panel p-5">
-        <h4 className="mb-4 text-sm font-semibold">🔮 Parámetros de Proyección</h4>
+        <h4 className="mb-4 flex items-center gap-2 text-sm font-semibold"><SlidersHorizontal className="size-4 text-accent-glow" /> Parámetros de Proyección</h4>
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {/* Numeric inputs */}
           <ControlInput
@@ -235,8 +236,9 @@ export function ProyeccionSubTab() {
       {/* Projection chart */}
       {projectionData.length > 0 && (
         <div className="glass-panel p-5">
-          <h4 className="mb-4 text-sm font-semibold">
-            📈 Proyección a {years} años (real, descontada inflación)
+          <h4 className="mb-4 flex items-center gap-2 text-sm font-semibold">
+            <TrendingUp className="size-4 text-accent-glow" />
+            Proyección a {years} años (real, descontada inflación)
           </h4>
           <ResponsiveContainer width="100%" height={320}>
             <AreaChart data={projectionData}>

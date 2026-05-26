@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback } from "react";
+import { Search, BarChart2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtPct } from "@/lib/format";
 import { CHART_TOOLTIP_STYLE, CHART_TOOLTIP_WRAPPER_STYLE, normalizeBase100 } from "@/lib/chart";
@@ -151,7 +152,7 @@ export function ExplorerView() {
           disabled={searching || !query.trim()}
           className="rounded-lg bg-accent-glow px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
         >
-          {searching ? "..." : "🔍 Buscar"}
+          {searching ? "..." : <><Search className="inline size-3.5 align-text-bottom mr-1" /> Buscar</>}
         </button>
       </div>
 
@@ -167,7 +168,7 @@ export function ExplorerView() {
               disabled={enrichMut.isPending}
               className="rounded-lg bg-accent-secondary px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
             >
-              {enrichMut.isPending ? "Cargando métricas..." : "📊 Cargar métricas"}
+              {enrichMut.isPending ? "Cargando métricas..." : <><BarChart2 className="inline size-3.5 align-text-bottom mr-1" /> Cargar métricas</>}
             </button>
           </div>
 
@@ -422,7 +423,7 @@ export function ExplorerView() {
               >
                 {compareMut.isPending
                   ? "Comparando..."
-                  : `⚖️ Comparar (${selected.size})`}
+                  : `Comparar (${selected.size})`}
               </button>
             </div>
           )}

@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { SubTabs } from "@/components/ui";
 import { MisCarterasView } from "./components/mis-carteras-view";
-import { FavoritosView } from "./components/favoritos-view";
 import { CompararView } from "./components/comparar-view";
+import { SustitucionesView } from "./components/sustituciones-view";
 
-type SubTab = "carteras" | "favoritos" | "comparar";
+type SubTab = "carteras" | "comparar" | "sustituciones";
 
 const SUB_TABS: { key: SubTab; label: string }[] = [
-  { key: "carteras", label: "� Mis Carteras" },
-  { key: "favoritos", label: "⭐ Favoritos" },
-  { key: "comparar", label: "⚖️ Comparar" },
+  { key: "carteras", label: "Mis Carteras" },
+  { key: "comparar", label: "Comparar" },
+  { key: "sustituciones", label: "Sustituciones" },
 ];
 
 export function PortfoliosTab() {
@@ -24,8 +24,8 @@ export function PortfoliosTab() {
       />
 
       {subTab === "carteras" && <MisCarterasView />}
-      {subTab === "favoritos" && <FavoritosView />}
       {subTab === "comparar" && <CompararView />}
+      {subTab === "sustituciones" && <SustitucionesView />}
     </div>
   );
 }

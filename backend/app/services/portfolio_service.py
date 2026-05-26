@@ -678,7 +678,7 @@ def build_history_batch() -> Dict[str, Any]:
     except Exception as _mp_outer_err:
         logger.warning("build_history_batch: error loading manual positions: %s", _mp_outer_err)
 
-    # Serie "Mi Cartera Actual"
+    # Serie "Mi Cartera"
     if len(fund_series) >= 2:
         try:
             total_val = pos["Valor_Actual"].sum() if pos["Valor_Actual"].notna().any() else pos["Capital_Invertido"].sum()
@@ -704,7 +704,7 @@ def build_history_batch() -> Dict[str, Any]:
                 .fillna(0)
             )
             cum_return = (1 + portfolio_return).cumprod() * 100
-            result["📊 Mi Cartera Actual"] = [
+            result["Mi Cartera"] = [
                 {"date": d.strftime("%Y-%m-%d"), "price": round(float(v), 4)}
                 for d, v in cum_return.items() if pd.notna(v)
             ]
@@ -722,6 +722,12 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     su fecha de ejecución, de modo que el patrimonio sube el día que se invierte y baja
     el día que se reembolsa.
 
+    Nota sobre traspasos: Un traspaso (movimiento de capital de un fondo a otro) debe tener
+    contribución neta CERO al capital aportado. Se detectan traspasos mediante:
+    - Notas "Traspaso saliente" / "Traspaso entrante" en transaction_overrides, o
+    - Pares de transacciones en fechas cercanas (±3 días) con importes coincidentes (±5%)
+      donde una es venta y otra es compra.
+
     Returns:
         {
           "series":  [{"date": "YYYY-MM-DD", "value": float, "invested": float}, ...],
@@ -736,7 +742,172 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     if movements.empty:
         return {"series": [], "monthly": []}
 
-    # All ISINs ever traded (including old share classes)
+    # ── Load transaction overrides to identify transfers ────────────────────
+    from .persistence_service import get_persistence_service as _get_ps_transfers
+    try:
+        _overrides = _get_ps_transfers().list_transaction_overrides()
+        # Build a dict: (isin, fecha) → notes
+        _override_notes: Dict[tuple, str] = {}
+        for _ov in _overrides:
+            _k = (str(_ov.get("isin", "")).strip().upper(), str(_ov.get("fecha", ""))[:10])
+            _override_notes[_k] = str(_ov.get("notes", "")).lower()
+    except Exception as _e:
+        logger.warning("Could not load transaction overrides for transfer detection: %s", _e)
+        _override_notes = {}
+
+    # ── Detect transfer pairs (traspasos) ────────────────────────────────────
+    # A transfer is when money moves from Fund A to Fund B with net zero contribution.
+    # Detection: (1) Notes contain "traspaso", or (2) matching buy/sell within ±3 days
+    transfer_incoming: set = set()  # (isin, fecha) tuples for incoming transfers
+    transfer_outgoing: set = set()  # (isin, fecha) tuples for outgoing transfers
+
+    # First pass: explicit transfers from notes
+    for (_isin, _fecha), _note in _override_notes.items():
+        if "traspaso" in _note or "transfer" in _note:
+            if "saliente" in _note or "outgoing" in _note:
+                transfer_outgoing.add((_isin, _fecha))
+            elif "entrante" in _note or "incoming" in _note:
+                transfer_incoming.add((_isin, _fecha))
+            else:
+                # Generic "traspaso" note without direction → assume outgoing if negative
+                _mask = (
+                    (movements["ISIN"] == _isin)
+                    & (movements["Fecha"].dt.strftime("%Y-%m-%d") == _fecha)
+                )
+                if _mask.any():
+                    _parts = movements.loc[_mask, "Participaciones"].iloc[0]
+                    if _parts < 0:
+                        transfer_outgoing.add((_isin, _fecha))
+                    else:
+                        transfer_incoming.add((_isin, _fecha))
+
+    # Second pass: for each EXPLICIT outgoing transfer, find matching incoming buy
+    # This ensures that when a user marks a sell as "Traspaso saliente", the
+    # corresponding buy in another fund is automatically treated as transfer-incoming
+    # (i.e. not counted as new capital).
+    mov_with_dates = movements.copy()
+    mov_with_dates["Fecha_str"] = mov_with_dates["Fecha"].dt.strftime("%Y-%m-%d")
+    sells = mov_with_dates[mov_with_dates["Participaciones"] < 0].copy()
+    buys = mov_with_dates[mov_with_dates["Participaciones"] > 0].copy()
+
+    for sell_key in list(transfer_outgoing):
+        _sell_isin, _sell_fecha = sell_key
+        _sell_mask = (
+            (mov_with_dates["ISIN"].str.strip().str.upper() == _sell_isin)
+            & (mov_with_dates["Fecha_str"] == _sell_fecha)
+        )
+        if not _sell_mask.any():
+            continue
+        _sell_row = mov_with_dates[_sell_mask].iloc[0]
+        sell_date = _sell_row["Fecha"]
+        sell_amount = abs(safe_float(_sell_row.get("Importe", 0)))
+
+        # Look for matching buys within ±14 days (transfers can take time to settle)
+        date_window = (sell_date - pd.Timedelta(days=14), sell_date + pd.Timedelta(days=14))
+        candidates = buys[
+            (buys["Fecha"] >= date_window[0])
+            & (buys["Fecha"] <= date_window[1])
+            & (buys["ISIN"].str.strip().str.upper() != _sell_isin)
+        ]
+        for _, buy in candidates.iterrows():
+            buy_amount = abs(safe_float(buy.get("Importe", 0)))
+            buy_key = (str(buy["ISIN"]).strip().upper(), buy["Fecha_str"])
+            if buy_key in transfer_incoming:
+                continue
+            # Check if amounts match within ±5%
+            if sell_amount > 0 and buy_amount > 0:
+                ratio = min(sell_amount, buy_amount) / max(sell_amount, buy_amount)
+                if ratio >= 0.95:
+                    transfer_incoming.add(buy_key)
+                    logger.info(
+                        "Matched explicit transfer outgoing %s %s (%.2f €) → incoming %s %s (%.2f €)",
+                        _sell_isin, _sell_fecha, sell_amount,
+                        buy["ISIN"], buy["Fecha_str"], buy_amount,
+                    )
+                    break  # One match per outgoing
+
+    # Third pass: detect remaining implicit transfers (unmatched sell/buy pairs)
+    for _, sell in sells.iterrows():
+        sell_date = sell["Fecha"]
+        sell_amount = abs(safe_float(sell.get("Importe", 0)))
+        sell_key = (str(sell["ISIN"]).strip().upper(), sell["Fecha_str"])
+        if sell_key in transfer_outgoing:  # Already marked explicitly or matched
+            continue
+        # Look for matching buys within ±3 days
+        date_window = (sell_date - pd.Timedelta(days=3), sell_date + pd.Timedelta(days=3))
+        candidates = buys[
+            (buys["Fecha"] >= date_window[0])
+            & (buys["Fecha"] <= date_window[1])
+            & (buys["ISIN"] != sell["ISIN"])  # Different fund
+        ]
+        for _, buy in candidates.iterrows():
+            buy_amount = abs(safe_float(buy.get("Importe", 0)))
+            buy_key = (str(buy["ISIN"]).strip().upper(), buy["Fecha_str"])
+            if buy_key in transfer_incoming:  # Already marked
+                continue
+            # Check if amounts match within ±5%
+            if sell_amount > 0 and buy_amount > 0:
+                ratio = min(sell_amount, buy_amount) / max(sell_amount, buy_amount)
+                if ratio >= 0.95:  # Within 5% tolerance
+                    transfer_outgoing.add(sell_key)
+                    transfer_incoming.add(buy_key)
+                    logger.info(
+                        "Detected implicit transfer: %s %s (%.2f €) → %s %s (%.2f €)",
+                        sell["ISIN"], sell["Fecha_str"], sell_amount,
+                        buy["ISIN"], buy["Fecha_str"], buy_amount,
+                    )
+                    break  # Match found for this sell
+
+    logger.info(
+        "Transfer detection: %d outgoing, %d incoming",
+        len(transfer_outgoing), len(transfer_incoming),
+    )
+
+    # ── Load manual positions and add them to movements ──────────────────────
+    # Manual positions are additional capital injections/withdrawals that are
+    # not in the broker CSV/TSV, so they must be merged into the timeline.
+    try:
+        from .persistence_service import get_persistence_service as _get_ps_manual
+        _manual_list = _get_ps_manual().list_manual_positions()
+        if _manual_list:
+            logger.info("Loading %d manual position entries", len(_manual_list))
+            manual_rows = []
+            for _mp in _manual_list:
+                mp_isin = str(_mp.get("isin", "")).strip().upper()
+                mp_fecha = _mp.get("fecha_compra")
+                mp_cap = float(_mp.get("capital_invertido") or 0)
+                mp_partic = _mp.get("participaciones")
+                mp_name = _mp.get("name") or mp_isin
+                
+                if not mp_isin or not mp_fecha:
+                    continue
+                
+                # Create a synthetic movement row for this manual position
+                manual_rows.append({
+                    "ISIN": mp_isin,
+                    "Fecha": pd.to_datetime(mp_fecha),
+                    "Participaciones": float(mp_partic) if mp_partic is not None else 0.0,
+                    "Importe": abs(mp_cap),
+                    "Tipo": "Venta" if mp_cap < 0 else "Compra",
+                    "Estado": "Finalizada",
+                    "Fondo": mp_name,
+                    "Fuente": "Manual",
+                    "Fecha_str": str(mp_fecha)[:10],
+                })
+            
+            if manual_rows:
+                manual_df = pd.DataFrame(manual_rows)
+                # Add to movements (will be processed together with broker orders)
+                movements = pd.concat([movements, manual_df], ignore_index=True).sort_values("Fecha")
+                logger.info("Added %d manual movements to timeline", len(manual_rows))
+                
+                # Update movement-derived structures
+                mov_with_dates = movements.copy()
+                mov_with_dates["Fecha_str"] = mov_with_dates["Fecha"].dt.strftime("%Y-%m-%d")
+    except Exception as _manual_err:
+        logger.warning("Could not load manual positions: %s", _manual_err)
+
+    # All ISINs ever traded (including old share classes AND manual positions)
     all_isins_raw: List[str] = [str(i) for i in movements["ISIN"].dropna().unique()]
     canonical_map: Dict[str, str] = {isin: get_canonical_isin(isin) for isin in all_isins_raw}
     # Fetch NAV for EVERY raw ISIN so each share class uses its own price
@@ -761,6 +932,13 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
         return {"series": [], "monthly": []}
 
     etf_isins: set = client.portfolio._etf_isins
+    
+    # Build a set of ISINs that come from manual positions (skip Excel localization fix)
+    manual_isins: set = set()
+    if "Fuente" in movements.columns:
+        manual_isins = set(movements[movements["Fuente"] == "Manual"]["ISIN"].unique())
+        if manual_isins:
+            logger.debug("Manual ISINs (skip _fix_loc): %s", manual_isins)
 
     mov_sorted = movements.sort_values("Fecha").copy()
     first_order_date = pd.Timestamp(mov_sorted["Fecha"].min())
@@ -771,11 +949,19 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     if len(all_dates) == 0:
         return {"series": [], "monthly": []}
 
-    def _fix_loc(units: float, amount: float, is_etf: bool = False) -> float:
+    def _fix_loc(units: float, amount: float, is_etf: bool = False, is_manual: bool = False) -> float:
+        """Fix Excel Spanish localization bug for units.
+        
+        Args:
+            units: Raw participaciones value
+            amount: Import value
+            is_etf: Whether this is an ETF (integers are real)
+            is_manual: Whether this is a manual position (already correct)
+        """
         if units == 0:
             return 0.0
         abs_u = abs(units)
-        if is_etf:
+        if is_etf or is_manual:
             return abs_u
         if abs_u % 1 == 0:
             return abs_u / 1000.0
@@ -793,6 +979,7 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     for raw_isin, grp in mov_sorted.groupby("ISIN"):
         raw_isin = str(raw_isin)
         canonical = canonical_map.get(raw_isin, raw_isin)
+        
         # We need at least some NAV data for this ISIN (own or canonical)
         if raw_isin not in nav_series and canonical not in nav_series:
             continue
@@ -806,6 +993,7 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
 
         for _, row in grp_sorted.iterrows():
             dt = pd.Timestamp(row["Fecha"])
+            dt_str = dt.strftime("%Y-%m-%d")
             raw_parts = float(row.get("Participaciones", 0))
             imp = abs(safe_float(row.get("Importe", 0)))
 
@@ -815,7 +1003,16 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
                 if "venta" in tipo or "reembolso" in tipo:
                     is_sell = True
 
-            true_parts = _fix_loc(raw_parts, imp, is_etf=is_etf_isin)
+            # Check if this is a manual position (already has correct participaciones)
+            is_manual_tx = raw_isin in manual_isins or (
+                "Fuente" in row.index and str(row.get("Fuente", "")) == "Manual"
+            )
+            true_parts = _fix_loc(raw_parts, imp, is_etf=is_etf_isin, is_manual=is_manual_tx)
+
+            # Check if this transaction is a transfer
+            tx_key = (raw_isin, dt_str)
+            is_transfer_in = tx_key in transfer_incoming
+            is_transfer_out = tx_key in transfer_outgoing
 
             if not is_sell and true_parts > 0:
                 cost = imp if imp > 0 else 0.0
@@ -830,16 +1027,21 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
                         cost = float(nav_at.iloc[-1]) * true_parts if not nav_at.empty else 0.0
                 day_parts[dt] += true_parts
                 running_parts += true_parts
+                # Add cost to invested (market value at purchase)
                 running_cost += cost
                 day_inv[dt] += cost
             elif is_sell and true_parts > 0:
                 day_parts[dt] -= true_parts
+                # Reduce invested by market value (imp), not FIFO cost
+                # The invested amount should change by the actual transaction value
+                day_inv[dt] -= imp
+                
+                # Update FIFO tracking for gains/losses calculation
                 if running_parts > 1e-9:
                     ratio = min(true_parts / running_parts, 1.0)
-                    cost_red = running_cost * ratio
+                    fifo_cost_reduction = running_cost * ratio
                     running_parts = max(0.0, running_parts - true_parts)
-                    running_cost = max(0.0, running_cost - cost_red)
-                    day_inv[dt] -= cost_red
+                    running_cost = max(0.0, running_cost - fifo_cost_reduction)
 
         if day_parts:
             ps = pd.Series(dict(day_parts)).sort_index()
@@ -908,7 +1110,11 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
 
     # ── Aggregate by canonical: each raw ISIN × its own NAV ─────────────────
     portfolio_value = pd.Series(0.0, index=all_dates)
+    # Total invested includes ALL ISINs, even those without NAV history
     total_invested = pd.Series(0.0, index=all_dates)
+    for canonical, inv_series in cum_inv_canonical.items():
+        total_invested = total_invested.add(inv_series, fill_value=0)
+    
     fund_value_series: Dict[str, pd.Series] = {}
     fund_inv_series: Dict[str, pd.Series] = {}
 
@@ -947,7 +1153,6 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
         fund_name = isin_name_map.get(canonical, canonical)
         fund_value_series[fund_name] = fund_val
         if canonical in cum_inv_canonical:
-            total_invested = total_invested.add(cum_inv_canonical[canonical], fill_value=0)
             fund_inv_series[fund_name] = cum_inv_canonical[canonical]
 
     # ── Build output series ──────────────────────────────────────────────────
@@ -955,89 +1160,7 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
     portfolio_value = portfolio_value[mask]
     total_invested = total_invested.reindex(portfolio_value.index, fill_value=0)
 
-    # Pin the last date's values to match "Mi Cartera Base" exactly.
-    # 1) Total Valor_Actual from positions (live) replaces the last evolution point.
-    # 2) Total Capital_Invertido from positions replaces the last invested point.
-    # 3) Per-fund values are also pinned so their sum equals the total.
-    # This eliminates NAV-lag drift and includes funds with no NAV history
-    # (e.g. ES0141116030 which has no Finect/YF price history).
-    try:
-        _live_inv_total = float(df_live["Capital_Invertido"].dropna().sum())
-        if _live_inv_total > 0 and last_date is not None and last_date in total_invested.index:
-            total_invested.loc[last_date] = _live_inv_total
-
-        # ── Pin per-fund at last_date to live Valor_Actual / Capital_Invertido ──
-        # Build a mapping: canonical ISIN → SUM(Valor_Actual), SUM(Capital_Invertido)
-        # IMPORTANT: df_live may have multiple rows for ISINs that map to the
-        # same canonical (e.g. different share classes in the same FUND_GROUP).
-        # We must aggregate by canonical so the per-fund pin matches the total.
-        _live_val_per_canonical: Dict[str, float] = {}
-        _live_inv_per_canonical: Dict[str, float] = {}
-        for _, _lr in df_live.iterrows():
-            _li = str(_lr["ISIN"])
-            _canonical_li = get_canonical_isin(_li)
-            _lv = _lr.get("Valor_Actual")
-            _lc = _lr.get("Capital_Invertido")
-            if _lv is not None and pd.notna(_lv):
-                _live_val_per_canonical[_canonical_li] = (
-                    _live_val_per_canonical.get(_canonical_li, 0.0) + float(_lv)
-                )
-            if _lc is not None and pd.notna(_lc):
-                _live_inv_per_canonical[_canonical_li] = (
-                    _live_inv_per_canonical.get(_canonical_li, 0.0) + float(_lc)
-                )
-
-        # Map canonical → fund_name (reverse of isin_name_map)
-        _can_to_name: Dict[str, str] = {
-            c: isin_name_map.get(c, c) for c in canonical_isins
-        }
-
-        for _ci, _fn in _can_to_name.items():
-            # Pin fund value
-            if (
-                _fn in fund_value_series
-                and last_date is not None
-                and _ci in _live_val_per_canonical
-                and last_date in fund_value_series[_fn].index
-            ):
-                fund_value_series[_fn].loc[last_date] = _live_val_per_canonical[_ci]
-            # Pin fund invested
-            if (
-                _fn in fund_inv_series
-                and last_date is not None
-                and _ci in _live_inv_per_canonical
-                and last_date in fund_inv_series[_fn].index
-            ):
-                fund_inv_series[_fn].loc[last_date] = _live_inv_per_canonical[_ci]
-
-        # Handle funds in df_live that have no entry in fund_value_series
-        # (e.g. no NAV history at all → they were skipped entirely)
-        for _ci, _fn in _can_to_name.items():
-            if _fn not in fund_value_series and _ci in _live_val_per_canonical and last_date is not None:
-                _syn = pd.Series(0.0, index=all_dates)
-                _syn.loc[last_date] = _live_val_per_canonical[_ci]
-                fund_value_series[_fn] = _syn
-                if _ci in _live_inv_per_canonical:
-                    _isyn = pd.Series(0.0, index=all_dates)
-                    _isyn.loc[last_date] = _live_inv_per_canonical[_ci]
-                    fund_inv_series[_fn] = _isyn
-
-        # ── Recompute portfolio totals from per-fund series ──────────────────
-        # This guarantees that the total evolution chart is ALWAYS the exact sum
-        # of the individual per-fund charts — no independent overrides that could
-        # create a jump/divergence on the last date.
-        if fund_value_series:
-            _pv_new = pd.concat(list(fund_value_series.values()), axis=1).fillna(0).sum(axis=1)
-            _pv_new = _pv_new.reindex(all_dates, fill_value=0.0)
-            _pv_mask = _pv_new > 0
-            portfolio_value = _pv_new[_pv_mask]
-        if fund_inv_series:
-            _ti_new = pd.concat(list(fund_inv_series.values()), axis=1).fillna(0).sum(axis=1)
-            total_invested = _ti_new.reindex(portfolio_value.index, fill_value=0.0)
-
-    except Exception as _pin_err:
-        logger.warning("Could not pin last evolution date to live positions: %s", _pin_err)
-
+    # ── Build series output ───────────────────────────────────────────────────
     series = [
         {
             "date": d.strftime("%Y-%m-%d"),
@@ -1048,6 +1171,67 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
         if pd.notna(v) and float(v) > 0
     ]
 
+    # ── Validation: compare evolution with live positions ────────────────────
+    # This logs any discrepancies between the calculated evolution and the
+    # broker's current positions. Differences indicate data quality issues.
+    if series and len(series) > 0:
+        try:
+            _final_val_evo = series[-1]["value"]
+            _final_inv_evo = series[-1]["invested"]
+            
+            # Get live positions for comparison
+            df_pos = client.positions(live=True)
+            _live_val = float(df_pos["Valor_Actual"].sum()) if not df_pos.empty else 0.0
+            _live_inv = float(df_pos["Capital_Invertido"].sum()) if not df_pos.empty else 0.0
+            
+            # Add manual positions (not in FIFO)
+            try:
+                from .persistence_service import get_persistence_service as _gps_val
+                _manual_items = _gps_val().list_manual_positions()
+                for _mi in _manual_items:
+                    _mi_cap = float(_mi.get("capital_invertido") or 0)
+                    _live_inv += _mi_cap
+                    # Estimate value from participaciones × NAV
+                    _mi_parts = _mi.get("participaciones")
+                    if _mi_parts:
+                        _mi_isin = str(_mi.get("isin", "")).strip().upper()
+                        _mi_nav_s = nav_series.get(_mi_isin)
+                        if _mi_nav_s is not None and len(_mi_nav_s) > 0:
+                            _live_val += float(_mi_parts) * float(_mi_nav_s.iloc[-1])
+            except Exception:
+                pass
+            
+            if _live_val > 0:
+                _val_diff = abs(_final_val_evo - _live_val)
+                _val_pct = (_val_diff / _live_val) * 100
+                if _val_pct > 1.0:
+                    logger.warning(
+                        "Evolution value differs from live: evo=%.2f, live=%.2f (diff=%.2f, %.2f%%)",
+                        _final_val_evo, _live_val, _val_diff, _val_pct,
+                    )
+                else:
+                    logger.info(
+                        "Evolution value matches live: evo=%.2f, live=%.2f (diff=%.2f)",
+                        _final_val_evo, _live_val, _val_diff,
+                    )
+            
+            if _live_inv > 0:
+                _inv_diff = abs(_final_inv_evo - _live_inv)
+                _inv_pct = (_inv_diff / _live_inv) * 100
+                if _inv_pct > 1.0:
+                    logger.warning(
+                        "Evolution invested differs from live: evo=%.2f, live=%.2f (diff=%.2f, %.2f%%)",
+                        _final_inv_evo, _live_inv, _inv_diff, _inv_pct,
+                    )
+                else:
+                    logger.info(
+                        "Evolution invested matches live: evo=%.2f, live=%.2f (diff=%.2f)",
+                        _final_inv_evo, _live_inv, _inv_diff,
+                    )
+        except Exception as _val_err:
+            logger.debug("Could not validate evolution against live positions: %s", _val_err)
+
+    # ── Build monthly summary ────────────────────────────────────────────────
     monthly: List[Dict[str, Any]] = []
     monthly_per_fund: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -1057,39 +1241,49 @@ def build_real_portfolio_history(years: int = 30) -> Dict[str, Any]:
         df_s["month"] = df_s["date"].dt.to_period("M")
         last_of_month = df_s.groupby("month").last().reset_index(drop=True)
         prev_value: Optional[float] = None
+        prev_invested: Optional[float] = None
         for _, row in last_of_month.iterrows():
             val = float(row["value"])
             inv = float(row["invested"])
             gain = val - inv
             gain_pct = (gain / inv * 100) if inv > 0 else 0.0
             mom = ((val / prev_value - 1) * 100) if prev_value and prev_value > 0 else None
+            # Monthly contribution = change in invested from previous month
+            monthly_contribution = inv - prev_invested if prev_invested is not None else inv
+            
             monthly.append({
                 "date": row["date"].strftime("%Y-%m-%d"),
                 "label": row["date"].strftime("%b %Y"),
                 "value": round(val, 2),
                 "invested": round(inv, 2),
+                "monthly_contribution": round(monthly_contribution, 2),
                 "gain": round(gain, 2),
                 "gain_pct": round(gain_pct, 2),
                 "mom": round(mom, 2) if mom is not None else None,
             })
             prev_value = val
+            prev_invested = inv
 
         month_end_dates = last_of_month["date"].tolist()
         for fund_name, fv_series in fund_value_series.items():
             fi_series = fund_inv_series.get(fund_name, pd.Series(0.0, index=all_dates))
             fund_monthly: List[Dict[str, Any]] = []
+            prev_fi: Optional[float] = None
             for dt in month_end_dates:
                 fv = float(fv_series.get(dt, 0.0)) if dt in fv_series.index else 0.0
                 fi = float(fi_series.get(dt, 0.0)) if dt in fi_series.index else 0.0
                 fg = fv - fi
                 fg_pct = (fg / fi * 100) if fi > 0 else 0.0
+                fund_contrib = fi - prev_fi if prev_fi is not None else fi
                 fund_monthly.append({
                     "date": dt.strftime("%Y-%m-%d"),
                     "value": round(fv, 2),
                     "invested": round(fi, 2),
+                    "monthly_contribution": round(fund_contrib, 2),
                     "gain": round(fg, 2),
                     "gain_pct": round(fg_pct, 2),
                 })
+                prev_fi = fi
             if any(m["value"] > 0 for m in fund_monthly):
                 monthly_per_fund[fund_name] = fund_monthly
 

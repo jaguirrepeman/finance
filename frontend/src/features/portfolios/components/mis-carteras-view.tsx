@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { ClipboardList, RefreshCw, Pencil, Trash2 } from "lucide-react";
 import { Spinner, ConfirmDialog } from "@/components/ui";
 import { fmtDate, fmtEur } from "@/lib/format";
 import { CHART_COLORS_HEX } from "@/lib/colors";
@@ -10,9 +11,9 @@ import {
   useCreatePortfolio,
   useUpdatePortfolio,
   useDeletePortfolio,
-  useCloneCurrentPortfolio,
   useFavorites,
 } from "../hooks";
+import { usePortfolioPositions } from "@/hooks/use-shared-queries";
 import type { SavedPortfolio } from "@/types";
 
 /** First 8 colors for the color picker */
@@ -20,12 +21,13 @@ const PALETTE = CHART_COLORS_HEX.slice(0, 8);
 
 export function MisCarterasView() {
   const { data: portfolios, isLoading } = usePortfolios();
-  const cloneMut = useCloneCurrentPortfolio();
   const deleteMut = useDeletePortfolio();
+  const { data: positionsData } = usePortfolioPositions();
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [cloneFromId, setCloneFromId] = useState<string | null>(null);
+  const [cloneFromLive, setCloneFromLive] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [showCopyFrom, setShowCopyFrom] = useState(false);
@@ -61,7 +63,7 @@ export function MisCarterasView() {
               disabled={(portfolios ?? []).length === 0}
               className="rounded-lg border border-border-glass px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40"
             >
-              📋 Copiar desde...
+              <ClipboardList className="inline size-3.5 align-text-bottom mr-1" /> Copiar desde...
             </button>
             {showCopyFrom && (portfolios ?? []).length > 0 && (
               <div className="absolute right-0 z-30 mt-1 w-56 rounded-lg border border-border-glass bg-bg-glass shadow-xl">
@@ -89,11 +91,15 @@ export function MisCarterasView() {
             )}
           </div>
           <button
-            onClick={() => cloneMut.mutate()}
-            disabled={cloneMut.isPending}
-            className="rounded-lg border border-border-glass px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-50"
+            onClick={() => {
+              setEditingId(null);
+              setCloneFromId(null);
+              setCloneFromLive(true);
+              setShowForm(true);
+            }}
+            className="rounded-lg border border-border-glass px-3 py-1.5 text-xs hover:bg-white/5"
           >
-            {cloneMut.isPending ? "Clonando..." : "🔄 Clonar cartera real"}
+            <RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Clonar cartera real
           </button>
         </div>
       </div>
@@ -103,10 +109,13 @@ export function MisCarterasView() {
         <PortfolioForm
           editId={editingId}
           cloneFromId={cloneFromId}
+          cloneFromLive={cloneFromLive}
+          livePositions={cloneFromLive ? positionsData : undefined}
           onClose={() => {
             setShowForm(false);
             setEditingId(null);
             setCloneFromId(null);
+            setCloneFromLive(false);
           }}
         />
       )}
@@ -205,13 +214,13 @@ function PortfolioCard({
             className="rounded px-2 py-1 text-xs hover:bg-white/5"
             title="Editar cartera (incluye calculadora de traspasos)"
           >
-            ✏️ Editar
+            <Pencil className="inline size-3.5 align-text-bottom mr-1" /> Editar
           </button>
           <button
             onClick={onDelete}
             className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-400/10"
           >
-            🗑️
+            <Trash2 className="size-3.5" />
           </button>
         </div>
       </div>
@@ -251,10 +260,17 @@ function PortfolioCard({
 function PortfolioForm({
   editId,
   cloneFromId,
+  cloneFromLive,
+  livePositions,
   onClose,
 }: {
   editId: string | null;
   cloneFromId?: string | null;
+  cloneFromLive?: boolean;
+  livePositions?: {
+    positions: Array<{ ISIN: string; Fondo: string; Valor_Actual?: number }>;
+    total_value: number;
+  } | null;
   onClose: () => void;
 }) {
   const { data: existing } = usePortfolioDetail(editId);
@@ -271,6 +287,8 @@ function PortfolioForm({
   >(existing?.funds ?? []);
   /** Whether weight inputs show percentages ("%") or absolute euros ("€") */
   const [weightMode, setWeightMode] = useState<"pct" | "eur">("pct");
+  /** Remembers the last-known EUR total so we can round-trip between % ↔ € without data loss */
+  const totalEurRef = useRef<number>(0);
   /** ISIN pre-selected as transfer source (traspaso button per-row) */
   const [traspasoFromIsin, setTraspasoFromIsin] = useState<string | undefined>(undefined);
 
@@ -285,10 +303,14 @@ function PortfolioForm({
     // switch to EUR mode and expand fractional weights → absolute amounts
     const tv = existing.total_value ?? 0;
     if (tv > 0) {
+      // Round to cents to guarantee exact reconstruction (sum of cents = total in cents)
       const eurFunds = (existing.funds ?? []).map((f) => ({
         ...f,
         weight: Math.round(f.weight * tv * 100) / 100,
       }));
+      // Recalculate total as sum of cent-rounded amounts so it stays consistent
+      const exactTotal = eurFunds.reduce((s, f) => s + f.weight, 0);
+      totalEurRef.current = Math.round(exactTotal * 100) / 100;
       setFunds(eurFunds);
       setWeightMode("eur");
     } else {
@@ -308,12 +330,30 @@ function PortfolioForm({
         ...f,
         weight: Math.round(f.weight * tv * 100) / 100,
       }));
+      const exactTotal = eurFunds.reduce((s, f) => s + f.weight, 0);
+      totalEurRef.current = Math.round(exactTotal * 100) / 100;
       setFunds(eurFunds);
       setWeightMode("eur");
     } else {
       setFunds(cloneSource.funds ?? []);
     }
     setCloneSynced(true);
+  }
+
+  // Sync from live portfolio when cloneFromLive (includes manual positions from Gestión de Cartera)
+  const [liveSynced, setLiveSynced] = useState(false);
+  if (cloneFromLive && livePositions && !liveSynced && !editId && !cloneFromId) {
+    const liveFunds = livePositions.positions
+      .filter((p) => (p.Valor_Actual ?? 0) > 0)
+      .map((p) => ({ isin: p.ISIN, name: p.Fondo, weight: Math.round((p.Valor_Actual ?? 0) * 100) / 100 }));
+    if (liveFunds.length > 0) {
+      totalEurRef.current = Math.round(liveFunds.reduce((s, f) => s + f.weight, 0) * 100) / 100;
+      setFunds(liveFunds);
+      setWeightMode("eur");
+      if (!name) setName("Copia de Mi Cartera");
+      if (!description) setDescription("Copia de Mi Cartera — " + new Date().toISOString().slice(0, 10));
+    }
+    setLiveSynced(true);
   }
 
   const addFund = useCallback(
@@ -332,10 +372,12 @@ function PortfolioForm({
   const updateWeight = (isin: string, weight: number) =>
     setFunds(funds.map((f) => (f.isin === isin ? { ...f, weight } : f)));
 
-  /** When in "€" mode, interpret value as absolute amount and convert to weight */
+  /** When in "€" mode, round to cents and keep totalEurRef up-to-date */
   const updateWeightFromEur = (isin: string, eurValue: number) => {
-    // Store as absolute amount temporarily (we normalise on save)
-    setFunds(funds.map((f) => (f.isin === isin ? { ...f, weight: eurValue } : f)));
+    const rounded = Math.round(eurValue * 100) / 100;
+    const updated = funds.map((f) => (f.isin === isin ? { ...f, weight: rounded } : f));
+    totalEurRef.current = Math.round(updated.reduce((s, f) => s + f.weight, 0) * 100) / 100;
+    setFunds(updated);
   };
 
   /** Total “weight” across all funds when in "€" mode (= total portfolio €) */
@@ -344,29 +386,60 @@ function PortfolioForm({
   const normalize = () => {
     const total = funds.reduce((s, f) => s + f.weight, 0);
     if (total === 0) return;
+    totalEurRef.current = Math.round(total * 100) / 100;
     setFunds(
       funds.map((f) => ({
         ...f,
-        weight: Math.round((f.weight / total) * 1_000_000) / 1_000_000,
+        weight: f.weight / total,
       })),
     );
     // After normalization, switch to % view so user sees the result
     setWeightMode("pct");
   };
 
+  /**
+   * Switch between % and € modes, converting stored weights so displayed values stay correct.
+   * • pct → eur: multiply fractions by last-known EUR total (totalEurRef)
+   * • eur → pct: divide EUR amounts by their sum to get 0-1 fractions
+   */
+  const handleSwitchMode = (mode: "pct" | "eur") => {
+    if (mode === weightMode) return;
+    if (mode === "eur") {
+      const tv = totalEurRef.current;
+      if (tv > 0) {
+        const eurFunds = funds.map((f) => ({
+          ...f,
+          weight: Math.round(f.weight * tv * 100) / 100,
+        }));
+        totalEurRef.current = Math.round(eurFunds.reduce((s, f) => s + f.weight, 0) * 100) / 100;
+        setFunds(eurFunds);
+      }
+    } else {
+      const sum = funds.reduce((s, f) => s + f.weight, 0);
+      if (sum > 0) {
+        totalEurRef.current = Math.round(sum * 100) / 100;
+        setFunds(funds.map((f) => ({ ...f, weight: f.weight / sum })));
+      }
+    }
+    setWeightMode(mode);
+  };
+
   const handleSave = async () => {
     // Normalize weights to 0-1 fractions before saving (handles € mode)
     const total = funds.reduce((s, f) => s + f.weight, 0);
-    const normalizedFunds =
-      total > 0 && Math.abs(total - 1) > 0.001
-        ? funds.map((f) => ({
-            ...f,
-            weight: Math.round((f.weight / total) * 1_000_000) / 1_000_000,
-          }))
-        : funds;
+    const needsNormalization = total > 0 && Math.abs(total - 1) > 0.001;
+    const normalizedFunds = needsNormalization
+      ? funds.map((f) => ({
+          ...f,
+          // Use 10 decimal places to minimise reconstruction error when expanding back to EUR
+          weight: Math.round((f.weight / total) * 10_000_000_000) / 10_000_000_000,
+        }))
+      : funds;
 
-    // Persist total_value when in EUR mode so the portfolio can restore amounts on re-open
-    const savedTotalValue = weightMode === "eur" && total > 1 ? total : undefined;
+    // Persist total_value rounded to cents so reconstruction is exact
+    const savedTotalValue = weightMode === "eur" && total > 1
+      ? Math.round(total * 100) / 100
+      : undefined;
 
     const body: Record<string, unknown> = { name, description, color, funds: normalizedFunds };
     if (savedTotalValue !== undefined) body.total_value = savedTotalValue;
@@ -386,9 +459,11 @@ function PortfolioForm({
       <h4 className="font-semibold">
         {editId
           ? "Editar Cartera"
-          : cloneFromId
-            ? `📋 Nueva Cartera – Copia de "${cloneSource?.name ?? "..."}"`
-            : "Nueva Cartera"}
+          : cloneFromLive
+            ? "Nueva Cartera – Copia de Mi Cartera"
+            : cloneFromId
+              ? `Nueva Cartera – Copia de "${cloneSource?.name ?? "..."}"`
+              : "Nueva Cartera"}
       </h4>
 
       {/* Name + Description */}
@@ -444,7 +519,7 @@ function PortfolioForm({
             {/* Weight mode toggle */}
             <div className="flex rounded-md border border-border-glass text-xs overflow-hidden">
               <button
-                onClick={() => setWeightMode("pct")}
+                onClick={() => handleSwitchMode("pct")}
                 className={cn(
                   "px-2 py-0.5 transition-colors",
                   weightMode === "pct"
@@ -455,7 +530,7 @@ function PortfolioForm({
                 %
               </button>
               <button
-                onClick={() => setWeightMode("eur")}
+                onClick={() => handleSwitchMode("eur")}
                 className={cn(
                   "px-2 py-0.5 transition-colors",
                   weightMode === "eur"
@@ -500,6 +575,7 @@ function PortfolioForm({
                   type="range"
                   min={0}
                   max={100}
+                  step={0.01}
                   value={f.weight * 100}
                   onChange={(e) =>
                     updateWeight(f.isin, Number(e.target.value) / 100)
@@ -510,12 +586,12 @@ function PortfolioForm({
                   type="number"
                   min={0}
                   max={100}
-                  step={0.1}
-                  value={+(f.weight * 100).toFixed(1)}
+                  step={0.001}
+                  value={+(f.weight * 100).toFixed(4)}
                   onChange={(e) =>
                     updateWeight(f.isin, Number(e.target.value) / 100)
                   }
-                  className="w-16 rounded border border-border-glass bg-bg-glass px-1.5 py-0.5 text-right text-xs tabular-nums focus:outline-none focus:border-accent-glow"
+                  className="w-20 rounded border border-border-glass bg-bg-glass px-1.5 py-0.5 text-right text-xs tabular-nums focus:outline-none focus:border-accent-glow"
                 />
                 <span className="w-4 text-xs text-text-secondary">%</span>
               </>
@@ -524,7 +600,7 @@ function PortfolioForm({
                 <input
                   type="number"
                   min={0}
-                  step={100}
+                  step={0.01}
                   value={f.weight === 0 ? "" : f.weight}
                   placeholder="0"
                   onChange={(e) =>
@@ -554,11 +630,19 @@ function PortfolioForm({
           </div>
         ))}
 
+        {/* Load from real portfolio ─────────────────────────────────── */}
+        {cloneFromLive && livePositions && !liveSynced && (
+          <p className="text-xs text-text-secondary animate-pulse">
+            Cargando posiciones de Mi Cartera…
+          </p>
+        )}
+
         <FundSearchInput
           onSelect={(r) => addFund(r.isin, r.name)}
           placeholder="Añadir fondo..."
           portfolioIsins={funds.map((f) => f.isin)}
           favoriteIsins={(favorites ?? []).map((f) => f.isin)}
+          favoritesData={favorites ?? []}
         />
       </div>
 
@@ -620,6 +704,7 @@ function TraspasoCalculator({
   triggerFromIsin?: string;
   onTriggerConsumed?: () => void;
 }) {
+  const { data: favorites } = useFavorites();
   const [showPanel, setShowPanel] = useState(false);
   const [fromIsin, setFromIsin] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
@@ -783,7 +868,8 @@ function TraspasoCalculator({
                           onSelect={(r) => { setToIsin(r.isin); setToName(r.name); }}
                           placeholder="Buscar fondo destino…"
                           portfolioIsins={[]}
-                          favoriteIsins={[]}
+                          favoriteIsins={(favorites ?? []).map((f) => f.isin)}
+                          favoritesData={favorites ?? []}
                         />
                       )}
                     </div>

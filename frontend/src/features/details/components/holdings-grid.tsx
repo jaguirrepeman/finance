@@ -1,4 +1,5 @@
 import type { PortfolioHoldingsResponse } from "@/types";
+import { Building2 } from "lucide-react";
 
 interface HoldingsGridProps {
   holdings: PortfolioHoldingsResponse;
@@ -10,7 +11,7 @@ export function HoldingsGrid({ holdings }: HoldingsGridProps) {
   return (
     <div className="glass-panel mt-6 p-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2.5">
-        <h3 className="font-semibold">🏢 Holdings Ponderados de Cartera</h3>
+        <h3 className="flex items-center gap-2 font-semibold"><Building2 className="size-4 text-accent-glow" /> Holdings Ponderados de Cartera</h3>
         <span className="text-xs text-text-secondary">
           {holdings.funds_with_holdings}/{holdings.total_funds} fondos con datos
           · Cobertura: {holdings.coverage_pct}%

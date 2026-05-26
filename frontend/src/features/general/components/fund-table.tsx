@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { BarChart2 } from "lucide-react";
 import type { Fund } from "@/types";
 import { fmtEur, fmtPct, signColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -23,7 +24,7 @@ export function FundTable({ funds, lastDate }: FundTableProps) {
     <div className="glass-panel p-6">
       <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h3 className="text-base font-semibold">Mi Cartera Base</h3>
+          <h3 className="text-base font-semibold">Mi Cartera</h3>
           {lastDate && (
             <div className="mt-0.5 text-xs text-text-secondary">
               Datos a: <strong>{lastDate}</strong>
@@ -51,7 +52,10 @@ export function FundTable({ funds, lastDate }: FundTableProps) {
             {/* TOTAL ROW */}
             <tr className="border-b-2 border-chart-1/30 bg-chart-1/8 font-bold">
               <td className="py-3 font-bold text-accent-glow">
-                📊 TOTAL CARTERA
+                <span className="flex items-center gap-1.5">
+                  <BarChart2 className="size-3.5" />
+                  TOTAL CARTERA
+                </span>
               </td>
               <td />
               <td className="py-3 text-right text-accent-glow">100%</td>

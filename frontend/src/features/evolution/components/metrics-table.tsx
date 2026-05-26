@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { BarChart2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { signColor, riskColor } from "@/lib/format";
 import { PORTFOLIO_KEY } from "@/lib/chart";
@@ -11,6 +12,8 @@ interface MetricsTableProps {
   start: Date;
   end: Date;
   benchmarkKey?: string | null;
+  /** fund name → ISIN mapping, used to display identifier badge */
+  fundIsinMap?: Record<string, string>;
 }
 
 type SortField =
@@ -31,6 +34,7 @@ export function MetricsTable({
   start,
   end,
   benchmarkKey,
+  fundIsinMap,
 }: MetricsTableProps) {
   const [sortField, setSortField] = useState<SortField>("natural");
   const [sortAsc, setSortAsc] = useState(false);
@@ -114,8 +118,9 @@ export function MetricsTable({
 
   return (
     <div className="glass-panel overflow-x-auto p-5">
-      <h4 className="mb-4 text-sm font-semibold">
-        📊 Métricas del Período
+      <h4 className="mb-4 flex items-center gap-2 text-sm font-semibold">
+        <BarChart2 className="size-4 text-accent-glow" />
+        Métricas del Período
       </h4>
       <table className="w-full min-w-[600px] border-collapse text-sm">
         <thead>
@@ -149,18 +154,25 @@ export function MetricsTable({
                 <td className="py-2 font-medium">
                   <span className="flex items-center gap-1.5">
                     <span
-                      className="inline-block h-2 w-2 rounded-sm"
+                      className="inline-block h-2 w-2 shrink-0 rounded-sm"
                       style={{
                         backgroundColor: fundColorMap[row.fund] ?? "#888",
                       }}
                     />
-                    <span
-                      className={cn(
-                        "max-w-[200px] truncate",
-                        isPortfolio && "font-bold text-yellow-400",
+                    <span className="flex flex-col">
+                      <span
+                        className={cn(
+                          "leading-tight",
+                          isPortfolio && "font-bold text-yellow-400",
+                        )}
+                      >
+                        {row.fund}
+                      </span>
+                      {fundIsinMap?.[row.fund] && (
+                        <span className="font-mono text-[0.6rem] text-text-muted leading-tight">
+                          {fundIsinMap[row.fund]}
+                        </span>
                       )}
-                    >
-                      {row.fund}
                     </span>
                   </span>
                 </td>

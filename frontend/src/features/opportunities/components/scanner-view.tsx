@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { Info, Settings, RefreshCw, BarChart2, Star } from "lucide-react";
 import { useQueries } from "@tanstack/react-query";
 import { Spinner, PillToggle, FundSearchInput } from "@/components/ui";
 import { fmtEur, fmtPct } from "@/lib/format";
@@ -195,20 +196,20 @@ export function ScannerView() {
             )}
             title="Explicación de indicadores"
           >
-            ℹ️ Indicadores
+            <Info className="inline size-3.5 align-text-bottom" /> Indicadores
           </button>
           <button
             onClick={() => setShowWeights(!showWeights)}
             className="rounded-lg border border-border-glass px-3 py-1.5 text-xs hover:bg-white/5"
           >
-            ⚙️ Configurar Pesos
+            <Settings className="inline size-3.5 align-text-bottom mr-1" /> Configurar Pesos
           </button>
           <button
             onClick={() => refetch()}
             disabled={isLoading}
             className="rounded-lg bg-accent-glow px-3 py-1.5 text-xs font-semibold text-black disabled:opacity-50"
           >
-            {isLoading ? "Escaneando..." : "🔄 Recalcular"}
+            {isLoading ? "Escaneando..." : <><RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Recalcular</>}
           </button>
         </div>
       </div>
@@ -250,7 +251,7 @@ export function ScannerView() {
               }}
               className="rounded-full border border-yellow-400/40 px-3 py-1 text-xs text-yellow-400 hover:bg-yellow-400/10 transition-colors"
             >
-              ⭐ Añadir todos los favoritos ({(favorites ?? []).length})
+              <Star className="inline size-3.5 fill-yellow-400 text-yellow-400 align-text-bottom mr-1" /> Añadir todos los favoritos ({(favorites ?? []).length})
             </button>
           )}
         </div>
@@ -402,7 +403,7 @@ export function ScannerView() {
 const INDICATOR_EXPLANATIONS = [
   {
     key: "trend",
-    label: "📈 Tendencia",
+    label: "Tendencia",
     color: "text-blue-400",
     description:
       "Mide si el fondo está en una tendencia alcista sostenida. Se calcula comparando el precio actual con la regresión lineal de los últimos 12 meses. Un score alto indica que el precio está por encima de su línea de tendencia.",
@@ -411,7 +412,7 @@ const INDICATOR_EXPLANATIONS = [
   },
   {
     key: "pullback",
-    label: "📉 Pullback",
+    label: "Pullback",
     color: "text-orange-400",
     description:
       "Detecta si el fondo ha sufrido una corrección reciente desde su máximo de los últimos 3-6 meses. Un pullback del -10% en un fondo con buena tendencia es una oportunidad típica de entrada.",
@@ -429,7 +430,7 @@ const INDICATOR_EXPLANATIONS = [
   },
   {
     key: "rsi",
-    label: "🔋 RSI",
+    label: "RSI",
     color: "text-yellow-400",
     description:
       "Relative Strength Index a 14 días. Mide si el fondo está sobrecomprado (>70) o sobrevendido (<30). Para timing de compra, un RSI bajo indica que hay momentum de venta agotado.",
@@ -438,7 +439,7 @@ const INDICATOR_EXPLANATIONS = [
   },
   {
     key: "vol_regime",
-    label: "🌪️ Volatilidad",
+    label: "Volatilidad",
     color: "text-red-400",
     description:
       "Detecta si estamos en un régimen de alta o baja volatilidad. Se calcula como la ratio de volatilidad reciente (1 mes) vs histórica (1 año). Ratio < 1 indica calma; > 1.5 indica estrés.",
@@ -447,7 +448,7 @@ const INDICATOR_EXPLANATIONS = [
   },
   {
     key: "short_term",
-    label: "⚡ Corto Plazo",
+    label: "Corto Plazo",
     color: "text-green-400",
     description:
       "Momentum a 1 mes que detecta si hay señales de recuperación inmediata. Combina cambio de precio últimos 20 días con aceleración del momentum. Ideal para aprovechar micro-rebotes.",
@@ -470,7 +471,7 @@ const SIGNAL_EXPLANATIONS: Record<string, { label: string; desc: string }> = {
 function IndicatorInfoPanel() {
   return (
     <div className="glass-panel space-y-4 p-5">
-      <h4 className="font-semibold">ℹ️ Guía de Indicadores de Timing</h4>
+      <h4 className="flex items-center gap-2 font-semibold"><Info className="size-4 text-accent-glow" /> Guía de Indicadores de Timing</h4>
       <p className="text-xs text-text-secondary">
         El escáner busca oportunidades de entrada en fondos analizando 6 dimensiones de timing.
         El objetivo es detectar fondos sólidos que han sufrido correcciones temporales — no fondos en caída libre.
@@ -554,10 +555,10 @@ function OpportunityCard({
         <div>
           <div className="flex items-center gap-1.5">
             {isInPortfolio && (
-              <span className="text-xs font-semibold rounded px-1 py-0.5 bg-accent-glow/20 text-accent-glow" title="En tu cartera">📊 cartera</span>
+              <span className="text-xs font-semibold rounded px-1 py-0.5 bg-accent-glow/20 text-accent-glow" title="En tu cartera"><BarChart2 className="inline size-3 align-text-bottom mr-0.5" />cartera</span>
             )}
             {isFavorite && (
-              <span className="text-yellow-400" title="Favorito">⭐</span>
+              <span className="text-yellow-400" title="Favorito"><Star className="inline size-3.5 fill-yellow-400" /></span>
             )}
             <h4 className="font-semibold">{opp.name}</h4>
           </div>

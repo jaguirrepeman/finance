@@ -1,4 +1,5 @@
 import { memo, useState, useMemo } from "react";
+import { BarChart2 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -106,8 +107,9 @@ function PerFundEvolutionChartInner({
   return (
     <div className="glass-panel p-5">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h4 className="text-sm font-semibold">
-          📊 Evolución por Fondo
+        <h4 className="flex items-center gap-2 text-sm font-semibold">
+          <BarChart2 className="size-4 text-accent-glow" />
+          Evolución por Fondo
         </h4>
         <PillToggle
           options={PERIOD_OPTIONS}

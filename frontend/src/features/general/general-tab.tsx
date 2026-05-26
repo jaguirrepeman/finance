@@ -93,8 +93,8 @@ export function GeneralTab() {
         <div>
           <PillToggle
             options={[
-              { key: "chart", label: "📈 Gráfico" },
-              { key: "monthly", label: "📅 Mensuales" },
+              { key: "chart", label: "Gráfico" },
+              { key: "monthly", label: "Mensuales" },
             ]}
             value={showMonthly ? "monthly" : "chart"}
             onChange={(v) => setShowMonthly(v === "monthly")}

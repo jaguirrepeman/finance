@@ -291,8 +291,10 @@ async def add_fund(fund: FundBase, background_tasks: BackgroundTasks):
 
     Permite múltiples aportaciones al mismo fondo (mismo ISIN, distinta fecha/importe).
     El tipo de activo se infiere automáticamente del nombre del fondo.
-    Si sólo se indica importe + fecha, se calcula automáticamente las participaciones
-    usando el NAV de esa fecha: participaciones = importe / NAV(fecha_compra).
+    - Si sólo se indica importe + fecha, se calculan automáticamente las participaciones:
+      participaciones = importe / NAV(fecha_compra).
+    - Si sólo se indican participaciones + fecha, se calcula automáticamente el importe:
+      importe = participaciones × NAV(fecha_compra).
     Importes negativos representan ventas/reembolsos.
     """
     from ..services.persistence_service import get_persistence_service
@@ -316,30 +318,40 @@ async def add_fund(fund: FundBase, background_tasks: BackgroundTasks):
     else:
         tipo = raw_tipo
 
-    # ── Derive participaciones from importe / NAV(fecha) ─────────────────
-    # If participaciones not given but importe + fecha_compra are, look up
-    # the NAV on that date to compute how many units were bought/sold.
-    if participaciones is None and capital_invertido is not None and fecha_compra:
+    # ── Derive participaciones / importe from NAV(fecha) ─────────────────
+    # Helper: look up the closest NAV on or before fecha_compra.
+    def _get_nav_on_date(isin_: str, fecha_: str) -> float | None:
         try:
             from ..services.portfolio_service import get_portfolio_client
             _client = get_portfolio_client()
-            _nav_df = _client.fund_nav_history(isin, years=15)
-            if _nav_df is not None and not _nav_df.empty:
-                _nav_df["date"] = _pd.to_datetime(_nav_df["date"])
-                target_date = _pd.Timestamp(fecha_compra)
-                # Find closest NAV date on or before target_date
-                _before = _nav_df[_nav_df["date"] <= target_date]
-                if _before.empty:
-                    _before = _nav_df  # fallback: use earliest available
-                nav_on_date = float(_before.sort_values("date").iloc[-1]["price"])
-                if nav_on_date > 0:
-                    participaciones = round(float(capital_invertido) / nav_on_date, 6)
+            _nav_df = _client.fund_nav_history(isin_, years=15)
+            if _nav_df is None or _nav_df.empty:
+                return None
+            _nav_df["date"] = _pd.to_datetime(_nav_df["date"])
+            target = _pd.Timestamp(fecha_)
+            _before = _nav_df[_nav_df["date"] <= target]
+            if _before.empty:
+                _before = _nav_df  # fallback: earliest available
+            nav = float(_before.sort_values("date").iloc[-1]["price"])
+            return nav if nav > 0 else None
         except Exception as _e:
             import logging as _log
             _log.getLogger(__name__).warning(
-                "add_fund: no se pudo calcular participaciones para %s en %s: %s",
-                isin, fecha_compra, _e,
+                "add_fund: no se pudo obtener NAV para %s en %s: %s", isin_, fecha_, _e
             )
+            return None
+
+    # Case 1: importe given, participaciones missing → participaciones = importe / NAV
+    if participaciones is None and capital_invertido is not None and fecha_compra:
+        nav = _get_nav_on_date(isin, fecha_compra)
+        if nav is not None:
+            participaciones = round(float(capital_invertido) / nav, 6)
+
+    # Case 2: participaciones given, importe missing → importe = participaciones × NAV
+    elif capital_invertido is None and participaciones is not None and fecha_compra:
+        nav = _get_nav_on_date(isin, fecha_compra)
+        if nav is not None:
+            capital_invertido = round(float(participaciones) * nav, 6)
 
     svc = get_persistence_service()
     position = svc.add_manual_position(
@@ -757,7 +769,11 @@ async def get_last_update():
 
 @router.get("/positions", response_model=PositionsResponse)
 async def get_positions():
-    """Posiciones FIFO con P&L completo."""
+    """Posiciones FIFO con P&L completo.
+
+    Incluye también los fondos añadidos manualmente en Gestión de Cartera
+    (manual positions de SQLite) que no estén ya en el cálculo FIFO.
+    """
     client = get_portfolio_client()
     df = client.positions(live=True)
 
@@ -767,6 +783,8 @@ async def get_positions():
         from ..services.finect_provider import _get_finect_url
     except Exception:
         _get_finect_url = lambda isin: None  # noqa: E731
+
+    etf_isins: set = getattr(client.portfolio, "_etf_isins", set())
 
     for _, row in df.iterrows():
         isin = row["ISIN"]
@@ -785,7 +803,41 @@ async def get_positions():
             Ganancia_Euros=row.get("Ganancia_Euros"),
             Ganancia_Pct=row.get("Ganancia_Pct"),
             finect_url=finect_url,
+            is_etf=isin in etf_isins,
         ))
+
+    # Supplement with manual positions from summary.json (includes Gestión de Cartera funds)
+    # build_summary() merges manual positions; client.positions() does not.
+    try:
+        _summary = load_json("summary.json")
+        if _summary:
+            _fifo_isins = {p.ISIN for p in positions}
+            for f in _summary.get("funds", []):
+                f_isin = (f.get("ISIN") or "").strip().upper()
+                if not f_isin or f_isin in _fifo_isins:
+                    continue  # already covered by FIFO
+                _valor = safe_float(f.get("Valor_Actual") or 0)
+                if _valor <= 0:
+                    continue
+                try:
+                    finect_url = _get_finect_url(f_isin)
+                except Exception:
+                    finect_url = None
+                positions.append(PositionItem(
+                    ISIN=f_isin,
+                    Fondo=f.get("Fondo", f_isin),
+                    Participaciones=safe_float(f.get("Participaciones") or 0),
+                    Precio_Compra_Medio=0.0,
+                    Capital_Invertido=round(safe_float(f.get("Capital_Invertido") or 0), 2),
+                    Precio_Actual=safe_float(f.get("NAV (Precio)") or 0) or None,
+                    Valor_Actual=round(_valor, 2),
+                    Ganancia_Euros=round(safe_float(f.get("Ganancia_Abs") or 0), 2) or None,
+                    Ganancia_Pct=round(safe_float(f.get("Ganancia_Pct") or 0), 2) or None,
+                    finect_url=finect_url,
+                    is_etf=f_isin in etf_isins,
+                ))
+    except Exception:
+        pass  # degraded mode: just return FIFO positions
 
     total_invested = sum(p.Capital_Invertido for p in positions)
     total_value = sum(p.Valor_Actual or 0 for p in positions)
@@ -1630,16 +1682,40 @@ async def delete_portfolio(portfolio_id: int):
 async def clone_current_portfolio(body: dict):
     """Clona la cartera real actual en una cartera guardada.
 
+    Usa summary.json cuando está disponible para incluir fondos añadidos
+    manualmente en Gestión de Cartera (manual positions). Cae back a
+    client.positions() si no hay caché.
+
     Body: {name?, description?}
     """
     client = get_portfolio_client()
-    positions = client.positions(live=True)
-    if positions.empty:
-        raise HTTPException(status_code=400, detail="No hay posiciones disponibles")
-
-    pos_list = positions.to_dict(orient="records")
     name = body.get("name", "Copia de Mi Cartera")
     description = body.get("description", "Copia de la cartera real del " + __import__("datetime").date.today().isoformat())
+
+    # Prefer summary.json which already merges manual positions
+    pos_list: list[dict] = []
+    _summary = load_json("summary.json")
+    if _summary and _summary.get("funds"):
+        for f in _summary["funds"]:
+            f_isin = (f.get("ISIN") or "").strip().upper()
+            _valor = float(f.get("Valor_Actual") or 0)
+            if f_isin and _valor > 0:
+                pos_list.append({
+                    "isin": f_isin,
+                    "name": f.get("Fondo", f_isin),
+                    "Valor_Actual": _valor,
+                })
+
+    if not pos_list:
+        # Fallback: use FIFO positions (no manual positions included)
+        positions = client.positions(live=True)
+        if positions.empty:
+            raise HTTPException(status_code=400, detail="No hay posiciones disponibles")
+        pos_list = positions.to_dict(orient="records")
+
+    if not pos_list:
+        raise HTTPException(status_code=400, detail="No hay posiciones disponibles")
+
     portfolio = _persistence().clone_from_live(pos_list, name=name, description=description)
     return portfolio
 
@@ -1695,7 +1771,7 @@ async def compare_portfolios_endpoint(body: dict):
                             "name": str(row.get("Fondo", row.get("ISIN", ""))),
                             "weight": round(weight, 6),
                         })
-                return {"name": "Mi Cartera Actual", "funds": funds}
+                return {"name": "Mi Cartera", "funds": funds}
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Error resolviendo cartera actual: {exc}") from exc
 
@@ -1728,10 +1804,13 @@ async def compare_portfolios_endpoint(body: dict):
         if total_w <= 0:
             return {"series": [], "metrics": None}
 
-        # Load NAV histories concurrently
+        # Load NAV histories concurrently.
+        # Use _YEARS=30 to match the main pipeline cache key (nav_history_key(isin, 30)).
+        # Requesting years+1 (e.g. 6) would always miss that cache, causing 25 s+ cold fetches.
+        _NAV_FETCH_YEARS = 30
         isins = [f["isin"] for f in funds if f.get("isin")]
         nav_results = await _asyncio.gather(
-            *[client.core.provider.get_nav_history(isin, years=years + 1) for isin in isins],
+            *[client.core.provider.get_nav_history(isin, years=_NAV_FETCH_YEARS) for isin in isins],
             return_exceptions=True,
         )
         fund_series: dict[str, list] = {}
@@ -2065,15 +2144,28 @@ async def get_providers_status():
         rows_total = 0
         first_date = None
         last_date = None
+        avg_gap_days: float | None = None
+        sparse_warning = False
+        missing_today = False
         source = cached or stale
         if source:
             try:
+                import datetime as _dt
                 df = _pd.DataFrame(source)
                 df["date"] = _pd.to_datetime(df["date"])
-                df = df.sort_values("date")
+                df = df.sort_values("date").drop_duplicates("date")
                 rows_total = len(df)
                 first_date = df["date"].iloc[0].strftime("%Y-%m-%d") if rows_total > 0 else None
                 last_date = df["date"].iloc[-1].strftime("%Y-%m-%d") if rows_total > 0 else None
+                if rows_total > 1:
+                    gaps = df["date"].diff().dt.days.dropna()
+                    avg_gap_days = float(round(gaps.mean(), 2))
+                    # Warn if average gap > 2.5 days (not daily)
+                    sparse_warning = avg_gap_days > 2.5
+                # Warn if last data point is > 7 calendar days ago (excluding weekends still leaves ~5 days)
+                if last_date:
+                    days_since = (_dt.date.today() - _dt.date.fromisoformat(last_date)).days
+                    missing_today = days_since > 7
             except Exception:
                 pass
 
@@ -2091,6 +2183,9 @@ async def get_providers_status():
             "is_fresh": is_fresh,
             "is_stale": not is_fresh and stale is not None,
             "no_data": rows_total == 0,
+            "avg_gap_days": avg_gap_days,
+            "sparse_warning": sparse_warning,
+            "missing_today": missing_today,
             "providers": sources_meta,  # {Finect: 1234, YahooFinance: 1000, FMP: 0}
         }
 
@@ -2114,6 +2209,11 @@ async def get_providers_status():
                 canonical_groups[can]["is_fresh"] = r["is_fresh"]
             if r["is_fresh"]:
                 canonical_groups[can]["is_fresh"] = True
+            # Propagate warnings — if any share class has a warning, the group has it
+            if r.get("sparse_warning"):
+                canonical_groups[can]["sparse_warning"] = True
+            if r.get("missing_today"):
+                canonical_groups[can]["missing_today"] = True
             canonical_groups[can]["no_data"] = canonical_groups[can]["rows"] == 0
 
     return {"providers": list(canonical_groups.values())}

@@ -1,4 +1,5 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState, useEffect } from "react";
+import { Calendar, ZoomIn, RotateCcw } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -7,6 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  ReferenceArea,
 } from "recharts";
 import { fmtDate } from "@/lib/format";
 import { CHART_TOOLTIP_STYLE, CHART_TOOLTIP_WRAPPER_STYLE, PORTFOLIO_KEY, downsample } from "@/lib/chart";
@@ -80,6 +82,11 @@ interface GrowthChartProps {
   fundColorMap: Record<string, string>;
   start: Date;
   end: Date;
+  /** Controlled zoom state lifted to parent so correlations/metrics react to it */
+  zoomLeft: string | null;
+  zoomRight: string | null;
+  onZoomChange: (left: string, right: string) => void;
+  onZoomReset: () => void;
 }
 
 
@@ -89,7 +96,48 @@ export function GrowthChartInner({
   fundColorMap,
   start,
   end,
+  zoomLeft,
+  zoomRight,
+  onZoomChange,
+  onZoomReset,
 }: GrowthChartProps) {
+  // ── Zoom selection state (internal, only during drag) ───────────────────
+  const [refAreaLeft, setRefAreaLeft] = useState<string>("");
+  const [refAreaRight, setRefAreaRight] = useState<string>("");
+  const [isSelecting, setIsSelecting] = useState(false);
+
+  // Reset zoom whenever the parent-level period changes
+  useEffect(() => {
+    onZoomReset();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end]);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleMouseDown = (e: any) => {
+    if (e?.activeLabel) {
+      setRefAreaLeft(e.activeLabel as string);
+      setIsSelecting(true);
+    }
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleMouseMove = (e: any) => {
+    if (isSelecting && e?.activeLabel) {
+      setRefAreaRight(e.activeLabel as string);
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (!isSelecting) return;
+    setIsSelecting(false);
+    if (refAreaLeft && refAreaRight && refAreaLeft !== refAreaRight) {
+      const [left, right] = [refAreaLeft, refAreaRight].sort();
+      onZoomChange(left, right);
+    }
+    setRefAreaLeft("");
+    setRefAreaRight("");
+  };
+
   const { chartData, activeKeys, commonStart } = useMemo(() => {
     // Compute common start = max first-date across all active funds within [start,end]
     // so all series start from the same point and are truly comparable.
@@ -144,6 +192,14 @@ export function GrowthChartInner({
     );
   }
 
+  // Filter chartData to the zoomed window (or show all)
+  const displayData =
+    zoomLeft && zoomRight
+      ? chartData.filter((d) => d.date >= zoomLeft! && d.date <= zoomRight!)
+      : chartData;
+
+  const isZoomed = Boolean(zoomLeft && zoomRight);
+
   // Put portfolio line last so it renders on top (appears visually above other lines)
   const sortedKeys = [
     ...activeKeys.filter((k) => k !== PORTFOLIO_KEY),
@@ -154,8 +210,8 @@ export function GrowthChartInner({
 
   return (
     <div className="glass-panel p-5">
-      {/* Legend */}
-      <div className="mb-2 flex flex-wrap gap-3">
+      {/* Legend + Reset Zoom */}
+      <div className="mb-2 flex flex-wrap items-center gap-3">
         {legendKeys.map((fund) => {
           const lastPt = chartData.findLast(
             (row) => (row as Record<string, unknown>)[fund] != null,
@@ -182,18 +238,38 @@ export function GrowthChartInner({
             </span>
           );
         })}
+        {isZoomed && (
+          <button
+            onClick={onZoomReset}
+            className="ml-auto flex items-center gap-1 rounded-full border border-accent-glow/50 bg-accent-glow/10 px-3 py-1 text-xs text-accent-glow transition-colors hover:bg-accent-glow/20"
+            title="Restablecer zoom"
+          >
+            <RotateCcw className="size-3" />
+            Reset zoom
+          </button>
+        )}
       </div>
       {/* Common start notice */}
       {activeKeys.length > 1 && (
-        <p className="mb-3 text-[0.65rem] text-text-muted">
-          📅 Base 100 desde {commonStart.toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })} — todos los fondos se comparan desde la fecha en que todos tienen histórico.
+        <p className="mb-1 text-[0.65rem] text-text-muted">
+          <Calendar className="inline size-3 align-text-bottom mr-1" />Base 100 desde {commonStart.toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })} — todos los fondos se comparan desde la fecha en que todos tienen histórico.
+        </p>
+      )}
+      {!isZoomed && (
+        <p className="mb-2 text-[0.6rem] text-text-muted flex items-center gap-1">
+          <ZoomIn className="size-3" />
+          Haz clic y arrastra en el gráfico para hacer zoom en un período.
         </p>
       )}
 
       <ResponsiveContainer width="100%" height={360}>
         <LineChart
-          data={chartData}
+          data={displayData}
           margin={{ top: 5, right: 10, left: 10, bottom: 0 }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          style={{ cursor: isSelecting ? "crosshair" : "default" }}
         >
           <XAxis
             dataKey="date"
@@ -213,13 +289,15 @@ export function GrowthChartInner({
             width={50}
           />
           <ReferenceLine y={0} stroke="hsla(220,20%,70%,0.3)" strokeDasharray="5 5" />
-          <Tooltip
-            content={(props) => (
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              <GrowthTooltipContent {...(props as any)} fundColorMap={fundColorMap} />
-            )}
-            wrapperStyle={CHART_TOOLTIP_WRAPPER_STYLE}
-          />
+          {!isSelecting && (
+            <Tooltip
+              content={(props) => (
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                <GrowthTooltipContent {...(props as any)} fundColorMap={fundColorMap} />
+              )}
+              wrapperStyle={CHART_TOOLTIP_WRAPPER_STYLE}
+            />
+          )}
           {sortedKeys.map((fund) => (
             <Line
               key={fund}
@@ -229,11 +307,21 @@ export function GrowthChartInner({
               strokeWidth={fund === PORTFOLIO_KEY ? 3.5 : 1.5}
               dot={false}
               connectNulls
-              isAnimationActive={true}
+              isAnimationActive={!isSelecting}
               animationDuration={600}
               animationEasing="ease-out"
             />
           ))}
+          {/* Selection reference area */}
+          {isSelecting && refAreaLeft && refAreaRight && (
+            <ReferenceArea
+              x1={refAreaLeft}
+              x2={refAreaRight}
+              strokeOpacity={0.3}
+              fill="hsla(220,100%,70%,0.15)"
+              stroke="hsl(220,100%,70%)"
+            />
+          )}
         </LineChart>
       </ResponsiveContainer>
     </div>

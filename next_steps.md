@@ -5,21 +5,14 @@ Exportar a CSV/Excel — botón en la tabla de General y en la de Mensuales que 
 Correccion de Bugs:
 
 
-En general, la Evolución Real del patrimonio no encaja con los datos sumados de Evolución Real por Fondo ni con los de Resumen de Inversiones. Introduce un test para que la posicion total deba coincidir fecha a fecha.
-
-
 En Evolución/Calendario de Rentabilidades Anuales, tiene que haber tanto 2026 como 2026 anualizado para comparar con 2025. En el formato Mensual, si se elige el año en curso y se muestran meses del año anterior, tienes que indicar que son del año anterior. Piensa la mejor forma de hacerlo automaticamente para que a 2025 le siga 2026 anualizado, y a este 2026 (y asi las comparaciones sean mas justas). Hablo de 2026 y 2025 pero es el año en curso y el anterior.
 
 
 Nueva corrección de bugs:
 
-En Carteras, cuando añado un fondo a una cartera (copiando por ejemplo mi cartera real), no se mantienen las cantidades exactas (tal vez se estén redondeando porcentajes).
 
-En Carteras, para los traspasos, se tiene que poder traspasar a un fondo nuevo. Tambien tienes que dar la opcion de traspasar todo (con un boton o algo así). Los traspasos se deben poder hacer al crear la cartera (ahora para hacerlos tengo que guardar y editar)
 
-En Carteras/Comparar los botones de Todos/Ninguno tienen que seleccionar todas las carteras a comparar, ahora sirven para mostrar las lineas una vez se han seleccionado. Tienes que mostrar tambien la tabla de retornos que hay en la pestaña de Evolucion. 
-
-Tarda mucho en hacer la comparativa de carteras, mira si hay alguna forma de darle más velocidad
+Ademas, Tarda mucho en hacer la comparativa de carteras, mira si hay alguna forma de darle más velocidad
 
 En Retiradas, revisa que el algoritmo este funcionando bien, si pongo 50000€ sale esto, que no tiene sentido:
 Venta Directa (FIFO)
@@ -40,10 +33,6 @@ Neto
 
 En Oportunidades, añade ejemplos detallados con graficas a la explicacion de los indicadores
 
-
-
-No encaja la evolucion por fondo agregada con la evolucion total de la cartera. La que esta bien es la primera. 
-No esta cuadrando el gráfico de Evolución Real del Patrimonio con los individuales de Evolución por Fondo (los ultimos son los que estan bien). En el primero se ve un aumento subito en el ultimo dia. Revisa esto a fondo y corrigelo (no mistakes).
 
 
 

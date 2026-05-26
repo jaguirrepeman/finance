@@ -1,12 +1,15 @@
 import { useState } from "react";
+import { Search, Scale } from "lucide-react";
 import { FundSearchInput, MetricCard } from "@/components/ui";
 import { fmtEur, signColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useSimulate } from "../hooks";
+import { useFavorites } from "@/features/portfolios/hooks";
 import type { FundSearchResult, FundDetail } from "@/types";
 import { api } from "@/api/client";
 
 export function AnadirFondoSubTab() {
+  const { data: favorites } = useFavorites();
   const [selectedFund, setSelectedFund] = useState<FundSearchResult | null>(
     null,
   );
@@ -37,8 +40,12 @@ export function AnadirFondoSubTab() {
     <div className="space-y-6">
       {/* Search */}
       <div className="glass-panel space-y-4 p-5">
-        <h4 className="text-sm font-semibold">🔍 Buscar fondo para añadir</h4>
-        <FundSearchInput onSelect={handleSelect} />
+        <h4 className="flex items-center gap-2 text-sm font-semibold"><Search className="size-4 text-accent-glow" /> Buscar fondo para añadir</h4>
+        <FundSearchInput
+          onSelect={handleSelect}
+          favoriteIsins={(favorites ?? []).map((f) => f.isin)}
+          favoritesData={favorites ?? []}
+        />
 
         {selectedFund && (
           <div className="mt-4 rounded-lg border border-border-glass bg-white/3 p-4">
@@ -144,7 +151,7 @@ function WeightChanges({
 }) {
   return (
     <div className="glass-panel overflow-x-auto p-5">
-      <h4 className="mb-3 text-sm font-semibold">⚖️ Cambios de Peso</h4>
+      <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold"><Scale className="size-4 text-accent-glow" /> Cambios de Peso</h4>
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border-glass text-xs text-text-secondary">

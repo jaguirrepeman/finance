@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { Wallet } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -36,8 +37,9 @@ export function OrdersSummaryChart({ data }: OrdersChartProps) {
     <div className="glass-panel p-5">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-primary)" }}>
-            💰 Capital Aportado
+          <h4 className="flex items-center gap-2 text-sm font-semibold" style={{ color: "var(--color-text-primary)" }}>
+            <Wallet className="size-4 text-accent-glow" />
+            Capital Aportado
           </h4>
           <p className="mt-0.5 text-xs text-text-secondary">
             <span>Total: </span>

@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from "react";
+import { TrendingUp } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -50,8 +51,9 @@ export function PortfolioChartInner({ series }: PortfolioChartProps) {
     <div className="glass-panel p-5">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h4 className="text-sm font-semibold">
-            📈 Evolución Real del Patrimonio
+          <h4 className="flex items-center gap-2 text-sm font-semibold">
+            <TrendingUp className="size-4 text-accent-glow" />
+            Evolución Real del Patrimonio
           </h4>
           <p className="mt-0.5 text-xs text-text-secondary">
             Basada en órdenes reales — NO en pesos objetivo

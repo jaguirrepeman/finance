@@ -1,4 +1,5 @@
 ﻿import { useState } from "react";
+import { Settings, Trash2, ClipboardList } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { FundSearchInput } from "@/components/ui";
@@ -313,8 +314,9 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
         onClick={() => setExpanded((p) => !p)}
         className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-white"
       >
-        <span className="flex items-center gap-3">
-          <span>⚙️ Gestión de cartera</span>
+        <span className="flex items-center gap-2">
+          <Settings className="size-4" />
+          Gestión de cartera
           {expanded && (
             <button
               type="button"
@@ -323,7 +325,7 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
               title="Recalcula el portfolio con todos los cambios guardados"
               className="rounded bg-accent-glow/20 px-2 py-0.5 text-xs font-medium text-accent-glow hover:bg-accent-glow/40 disabled:opacity-50"
             >
-              {isRecalculating ? "⏳ Recalculando…" : "🔄 Recalcular cartera"}
+              {isRecalculating ? "Recalculando…" : "Recalcular cartera"}
             </button>
           )}
           {totalChanges > 0 && (
@@ -340,8 +342,9 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
 
           {/* ── 1. CAMBIOS — Unified changes section ─────────────── */}
           <section>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-white">
-              📋 Cambios sobre los datos fuente
+              <h3 className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-white">
+              <ClipboardList className="size-3.5" />
+              Cambios sobre los datos fuente
             </h3>
             <p className="mb-3 text-xs text-text-secondary">
               Todos los ajustes realizados sobre los ficheros de origen. Incluye correcciones de traspasos,
@@ -423,7 +426,7 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
                               title="Eliminar corrección"
                               className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
                             >
-                              🗑️
+                              <Trash2 className="size-3.5" />
                             </button>
                           </td>
                         </tr>
@@ -591,7 +594,7 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
                             title="Eliminar esta aportación"
                             className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
                           >
-                            🗑️
+                            <Trash2 className="size-3.5" />
                           </button>
                         </td>
                       </tr>
@@ -638,18 +641,18 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
                       <input
                         type="number"
                         step="0.01"
-                        placeholder="Ej: 10000 o -5000"
+                        placeholder="Auto si introduces participaciones"
                         value={mForm.invertido}
                         onChange={(e) => setMForm({ ...mForm, invertido: e.target.value })}
                         className={`${inputCls} w-full text-right`}
                       />
                     </div>
                     <div className="flex flex-col gap-0.5">
-                      <span className="text-[11px] text-text-secondary">Participaciones <span className="opacity-60">(opcional)</span></span>
+                      <span className="text-[11px] text-text-secondary">Participaciones <span className="opacity-60">(auto si introduces importe)</span></span>
                       <input
                         type="number"
                         step="0.000001"
-                        placeholder="Auto-calculado"
+                        placeholder="Auto si introduces importe"
                         value={mForm.participaciones}
                         onChange={(e) => setMForm({ ...mForm, participaciones: e.target.value })}
                         className={`${inputCls} w-full text-right`}
@@ -691,7 +694,7 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
               Si un movimiento de abajo debería ser una <em className="text-white">salida</em> de dinero,
               pulsa <span className="rounded bg-white/10 px-1 font-semibold text-white">↩ Traspaso</span> para
               marcarlo como negativo. El cambio se guarda y se aplica al recalcular.
-              Puedes <span className="rounded bg-white/10 px-1 font-semibold text-white">🗑️</span> eliminar movimientos que no deberían estar en el portfolio.
+              Puedes <span className="rounded bg-white/10 px-1 font-semibold text-white"><Trash2 className="inline size-3 align-text-bottom" /></span> eliminar movimientos que no deberían estar en el portfolio.
             </p>
 
             <input
@@ -770,7 +773,7 @@ const totalChanges = overrides.length + excludedMovements.length + manualPositio
                               title="Eliminar este movimiento del portfolio"
                               className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-400/20 disabled:opacity-50"
                             >
-                              🗑️
+                              <Trash2 className="size-3.5" />
                             </button>
                             </div>
                           </td>

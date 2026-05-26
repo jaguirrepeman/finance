@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { ArrowLeftRight } from "lucide-react";
 import type { MonthlyData, RealEvolution } from "@/types";
 import { fmtEur, fmtPct, signColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -71,7 +72,7 @@ export function MonthComparisonWidget({ evolution }: MonthComparisonProps) {
 
   return (
     <div className="glass-panel p-5">
-      <h4 className="mb-3 text-sm font-semibold">🔄 Comparación de Meses</h4>
+      <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold"><ArrowLeftRight className="size-4 text-accent-glow" /> Comparación de Meses</h4>
 
       {/* Selectors */}
       <div className="mb-4 grid grid-cols-2 gap-3">

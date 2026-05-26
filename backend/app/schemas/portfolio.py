@@ -64,6 +64,7 @@ class PositionItem(BaseModel):
     Ganancia_Euros: Optional[float] = None
     Ganancia_Pct: Optional[float] = None
     finect_url: Optional[str] = None  # Full Finect URL with slug
+    is_etf: bool = False  # True if this position is an ETF (non-traspasable)
 
 
 class PositionsResponse(BaseModel):

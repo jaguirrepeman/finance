@@ -29,6 +29,11 @@ const PortfoliosTab = lazy(() =>
     default: m.PortfoliosTab,
   })),
 );
+const FavoritosTab = lazy(() =>
+  import("@/features/portfolios/components/favoritos-view").then((m) => ({
+    default: m.FavoritosView,
+  })),
+);
 const ProvidersTab = lazy(() =>
   import("@/features/providers").then((m) => ({
     default: m.ProvidersTab,
@@ -93,6 +98,14 @@ export function App() {
           element={
             <Suspense fallback={<TabFallback />}>
               <PortfoliosTab />
+            </Suspense>
+          }
+        />
+        <Route
+          path="favoritos"
+          element={
+            <Suspense fallback={<TabFallback />}>
+              <FavoritosTab />
             </Suspense>
           }
         />

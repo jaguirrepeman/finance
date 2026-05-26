@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { Search, Star } from "lucide-react";
 import { Spinner } from "@/components/ui";
 import { fmtDate } from "@/lib/format";
 import { api } from "@/api/client";
@@ -60,7 +61,7 @@ export function FavoritosView() {
             disabled={searching}
             className="rounded-lg bg-accent-glow px-3 py-1.5 text-xs font-semibold text-black disabled:opacity-50"
           >
-            {searching ? "..." : "🔍"}
+            {searching ? "..." : <Search className="size-3.5" />}
           </button>
         </div>
 
@@ -114,7 +115,7 @@ export function FavoritosView() {
               className="glass-panel flex items-center justify-between p-3"
             >
               <div className="flex items-center gap-2">
-                <span className="text-yellow-400">⭐</span>
+                <span className="text-yellow-400"><Star className="size-4 fill-yellow-400" /></span>
                 <div>
                   <div className="font-medium">{f.name}</div>
                   <div className="flex items-center gap-2 text-xs text-text-secondary">

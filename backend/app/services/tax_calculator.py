@@ -1,13 +1,13 @@
 """
 tax_calculator.py — Optimizador fiscal para retiradas de fondos.
 
-Implementa dos algoritmos:
+Implementa tres algoritmos:
 
-1. ``optimize_withdrawal`` — plan FIFO simple (vende primero el lote con
-   menor plusvalía relativa de todo el portfolio).
+1. ``optimize_withdrawal`` — plan greedy FIFO (vende primero el lote FIFO
+   con menor plusvalía relativa, eligiendo el fondo óptimo en cada paso).
 
-2. ``optimize_withdrawal_via_traspaso`` — optimizador global FIFO +
-   traspasos previos (Art. 94 Ley 35/2006 IRPF):
+2. ``optimize_withdrawal_via_traspaso`` — optimizador global con traspasos
+   previos (Art. 94 Ley 35/2006 IRPF):
 
    Best-practice para minimizar impuestos al retirar efectivo:
    - Los traspasos entre IICs no tributan → pivote legal.
@@ -22,6 +22,14 @@ Implementa dos algoritmos:
      existente en cartera (sin abrir cuentas nuevas). Si no hay ninguno,
      se recomiendan fondos de inversión indexados de bajo coste registrados
      en CNMV/ESMA adecuados para inversores españoles.
+   
+   El escenario "directo" (baseline de comparación) usa FIFO cronológico
+   puro: vende todos los lotes en orden de fecha de compra, sin optimización.
+   Esto representa la realidad fiscal de una venta sin planificación.
+
+3. ``_direct_fifo_plan`` (interno) — FIFO cronológico puro: vende lotes en
+   orden estricto de fecha de compra, sin selección inteligente de fondos.
+   Usado como baseline para medir el ahorro fiscal del optimizador.
 
 Tramos IRPF base del ahorro (Art. 66 Ley 35/2006, actualizados 2024):
   19 % hasta 6.000 €
@@ -352,15 +360,16 @@ class TaxOptimizer:
         opt_tax = self.calculate_taxes(optimized_result["total_gain"])
 
         # Safety net: the greedy traspaso plan should never be worse than direct FIFO.
-        # This can happen when direct FIFO naturally picks loss lots (negative gain)
-        # while the greedy plan moves those loss-lots to traspaso and ends up selling
-        # profitable lots. When direct is already optimal, report it as both scenarios.
+        # However, when the chronological FIFO naturally picks loss lots or very low-gain
+        # lots (due to fortuitous timing), the optimized plan may end up with higher tax
+        # because it moves loss-generating lots to traspaso and sells profitable ones.
+        # In those rare cases, the unoptimized FIFO is already optimal — no action needed.
         direct_is_optimal = direct_tax <= opt_tax
         if direct_is_optimal:
             logger.info(
-                "Colapso de escenario: la venta directa FIFO (impuesto=%.2f€) es más"
-                " eficiente que el plan traspaso+reembolso (impuesto=%.2f€)."
-                " Usando FIFO como escenario optimizado.",
+                "Scenario collapse: chronological FIFO (tax=%.2f€) is more efficient "
+                "than the traspaso+reembolso plan (tax=%.2f€). Using direct FIFO as both "
+                "scenarios. This happens when the oldest lots have losses or minimal gains.",
                 direct_tax, opt_tax,
             )
             # Override optimized plan with direct FIFO — traspasos not needed
@@ -382,9 +391,10 @@ class TaxOptimizer:
         opt_withdrawn = round(sum(s.get("Importe", 0.0) for s in optimized_result["reembolsos"]), 2)
 
         notas_base = (
-            "La venta directa FIFO es ya la estrategia óptima: los lotes más antiguos "
-            "tienen pérdidas o ganancias mínimas, por lo que el traspaso previo no "
-            "mejora el resultado fiscal. No se requiere ninguna acción adicional."
+            "La venta directa FIFO cronológica es ya la mejor opción: los lotes más "
+            "antiguos tienen pérdidas o ganancias mínimas, por lo que el traspaso previo "
+            "no mejora el resultado fiscal. Simplemente vender en orden cronológico (sin "
+            "planificación adicional) ya es óptimo en tu caso. No se requiere ninguna acción adicional."
             if direct_is_optimal else
             "Estrategia en 2 pasos (Art. 94 Ley 35/2006 IRPF): "
             "① Traspasar los lotes indicados al fondo destino (operación EXENTA). "
@@ -393,6 +403,23 @@ class TaxOptimizer:
             "los lotes más recientes → menor plusvalía → menor IRPF. "
             "La plusvalía diferida queda en el fondo destino hasta un futuro reembolso. "
         )
+
+        # ── Desglose ganancias/pérdidas (Art. 49.1.b Ley 35/2006) ──
+        # Las ganancias y pérdidas patrimoniales de la base del ahorro se
+        # compensan automáticamente en la misma declaración de IRPF.
+        # Solo el saldo neto positivo tributa.
+        def _gain_loss_breakdown(steps: List[Dict]) -> Dict[str, float]:
+            gains = sum(s["Ganancia_Patrimonial"] for s in steps if s["Ganancia_Patrimonial"] > 0)
+            losses = sum(s["Ganancia_Patrimonial"] for s in steps if s["Ganancia_Patrimonial"] < 0)
+            return {
+                "ganancias_brutas": round(gains, 2),
+                "perdidas_brutas": round(losses, 2),
+                "saldo_neto": round(gains + losses, 2),
+                "compensacion_aplicada": round(min(gains, abs(losses)), 2) if losses < 0 else 0.0,
+            }
+
+        direct_breakdown = _gain_loss_breakdown(direct_result["steps"])
+        opt_breakdown = _gain_loss_breakdown(optimized_result["reembolsos"])
 
         return {
             "target_amount": target_amount,
@@ -405,6 +432,7 @@ class TaxOptimizer:
                 "withdrawn_amount": direct_withdrawn,
                 "neto_recibido": round(direct_withdrawn - direct_tax, 2),
                 "detalle": direct_result["steps"],
+                **direct_breakdown,
             },
             "escenario_optimizado": {
                 "ganancia_patrimonial": round(optimized_result["total_gain"], 2),
@@ -412,6 +440,7 @@ class TaxOptimizer:
                 "withdrawn_amount": opt_withdrawn,
                 "neto_recibido": round(opt_withdrawn - opt_tax, 2),
                 "detalle": optimized_result["reembolsos"],
+                **opt_breakdown,
             },
 
             # ── Ahorros ──
@@ -467,69 +496,46 @@ class TaxOptimizer:
         target_amount: float,
     ) -> Dict[str, Any]:
         """
-        Calcula el coste fiscal de un reembolso FIFO puro (sin traspasos).
+        Calcula el coste fiscal de un reembolso FIFO puro cronológico.
 
-        La estrategia actual del `optimize_withdrawal` ya intenta minimizar
-        el impuesto eligiendo el fondo con menor plusvalía relativa primero.
-        Aquí calculamos el peor caso real: FIFO estricto fund-by-fund en el
-        orden que elegiría el algoritmo greedy sin traspasos.
+        Este es el baseline real: vende todos los lotes en orden cronológico
+        estricto (por fecha de compra global), sin optimización alguna.
+        
+        Este escenario representa lo que ocurriría si el inversor simplemente
+        vendiera participaciones sin planificación fiscal, respetando FIFO
+        de forma cronológica pura.
         """
-        # Clonar lotes para no mutar el estado
-        lots: List[Dict] = []
+        # Aplanar todos los lotes y ordenar cronológicamente
+        all_lots: List[Dict] = []
         for isin, isin_lots in lots_by_isin.items():
             price = self.current_prices.get(isin, 0.0)
             if price <= 0:
                 continue
             for lot in isin_lots:
-                gain_pct = self._gain_pct(lot, price)
-                lots.append({**lot, "_price": price, "_gain_pct": gain_pct})
+                all_lots.append({
+                    **lot,
+                    "_price": price,
+                    "_isin": isin,
+                })
 
-        # Dentro de cada fondo, FIFO obliga a liquidar los más antiguos primero.
-        # El "greedy FIFO sin traspaso" = elegir el fondo cuyo lote más antiguo
-        # tiene la menor plusvalía (misma lógica que optimize_withdrawal).
+        # Ordenar por fecha de compra (FIFO cronológico puro)
+        all_lots.sort(key=lambda x: x["Fecha"])
+
         steps: List[Dict] = []
         total_gain = 0.0
         remaining = target_amount
 
-        # Estado per-fund: índice del siguiente lote a consumir
-        queue: Dict[str, int] = {isin: 0 for isin in lots_by_isin}
-
-        while remaining > 0.01:
-            best_isin = None
-            best_gain_pct_val = float("inf")
-            best_is_etf = False
-
-            for isin, isin_lots in lots_by_isin.items():
-                idx = queue[isin]
-                if idx >= len(isin_lots):
-                    continue
-                price = self.current_prices.get(isin, 0.0)
-                if price <= 0:
-                    continue
-                lot = isin_lots[idx]
-                gp = self._gain_pct(lot, price)
-                is_etf = self._is_etf(isin, lot)
-                # Prioritise ETFs over funds in case of equal gain%:
-                # ETFs cannot be transferred (Art. 94 LIRPF), so selling
-                # them first preserves the traspaso option for funds.
-                if (gp < best_gain_pct_val) or (
-                    gp == best_gain_pct_val and is_etf and not best_is_etf
-                ):
-                    best_gain_pct_val = gp
-                    best_isin = isin
-                    best_is_etf = is_etf
-
-            if best_isin is None:
+        for lot in all_lots:
+            if remaining <= 0.01:
                 break
 
-            price = self.current_prices[best_isin]
-            lot = lots_by_isin[best_isin][queue[best_isin]]
+            isin = lot["_isin"]
+            price = lot["_price"]
             lot_value = lot["Participaciones_Restantes"] * price
 
             if lot_value <= remaining:
                 units = lot["Participaciones_Restantes"]
                 amount = lot_value
-                queue[best_isin] += 1
             else:
                 units = remaining / price
                 amount = remaining
@@ -539,14 +545,14 @@ class TaxOptimizer:
             remaining -= amount
 
             steps.append({
-                "ISIN": best_isin,
-                "Fondo": lot.get("Fondo", best_isin),
+                "ISIN": isin,
+                "Fondo": lot.get("Fondo", isin),
                 "Fecha_Compra": lot["Fecha"],
                 "Participaciones": round(units, 6),
                 "Importe": round(amount, 2),
                 "Ganancia_Patrimonial": round(gain, 2),
                 "Precio_Compra_Unitario": lot["Precio_Compra_Unitario"],
-                "es_etf": self._is_etf(best_isin, lot),
+                "es_etf": self._is_etf(isin, lot),
             })
 
         return {"total_gain": total_gain, "steps": steps}
@@ -678,8 +684,42 @@ class TaxOptimizer:
                         "es_etf": True,
                         "nota": "ETF/ETP — no traspasable (obligatorio FIFO bursátil)",
                     })
+                elif gain_k < 0:
+                    # ── OPTIMIZACIÓN CLAVE (Art. 49.1.b Ley 35/2006 IRPF) ──
+                    # Lote con PÉRDIDA latente: NO se traspasa, se REEMBOLSA.
+                    # Las pérdidas realizadas compensan ganancias del mismo
+                    # ejercicio fiscal, reduciendo la base imponible del ahorro.
+                    # Traspasar un lote con pérdida desperdiciaría ese beneficio
+                    # fiscal (la pérdida quedaría "congelada" en el fondo destino).
+                    if remaining <= 0.01:
+                        # No hay más importe que retirar, pero aún así conviene
+                        # vender este lote para realizar la pérdida si es posible.
+                        # Lo marcamos como handled; una sugerencia de tax-loss
+                        # harvesting lo señalará por separado.
+                        handled[isin].add(k)
+                        continue
+                    if amount <= remaining:
+                        sold_units = units
+                        sold_amount = amount
+                    else:
+                        sold_units = remaining / older_price
+                        sold_amount = remaining
+                    sold_gain = (older_price - older["Precio_Compra_Unitario"]) * sold_units
+                    total_gain += sold_gain  # negativo → reduce base imponible
+                    remaining -= sold_amount
+                    reembolsos.append({
+                        "ISIN": isin,
+                        "Fondo": older.get("Fondo", isin),
+                        "Fecha_Compra": older["Fecha"],
+                        "Participaciones": round(sold_units, 6),
+                        "Importe": round(sold_amount, 2),
+                        "Ganancia_Patrimonial": round(sold_gain, 2),
+                        "Precio_Compra_Unitario": older["Precio_Compra_Unitario"],
+                        "es_etf": False,
+                        "nota": "Lote con pérdida — se reembolsa para compensar ganancias (Art. 49.1.b LIRPF)",
+                    })
                 else:
-                    # Fondo de inversión: lotes anteriores → traspaso (exento)
+                    # Fondo de inversión con ganancia: lotes anteriores → traspaso (exento)
                     traspasos.append({
                         "ISIN": isin,
                         "Fondo": older.get("Fondo", isin),

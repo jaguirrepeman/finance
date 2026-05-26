@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
+import { Calendar } from "lucide-react";
 import { Spinner, PillToggle } from "@/components/ui";
+import { PORTFOLIO_KEY } from "@/lib/chart";
 import { useAnnualReturns, useHistoryBatch } from "../hooks";
 
 function pctToHeatColor(v: number | null | undefined): string {
@@ -106,21 +108,17 @@ export function AnnualReturnsHeatmap({ activeFunds }: { activeFunds?: string[] }
   const monthlyFunds = useMemo(() => {
     const all = Object.keys(monthlyReturns);
     if (!activeFunds?.length) return all;
-    // Preserve activeFunds order, then append any fund present in data but not in activeFunds
-    const ordered = activeFunds.filter((f) => all.includes(f));
-    const extra = all.filter((f) => !activeFunds.includes(f));
-    return [...ordered, ...extra];
+    // Show only active funds in their drag-reordered order
+    return activeFunds.filter((f) => all.includes(f));
   }, [monthlyReturns, activeFunds]);
 
-  // ── Annual funds list (ordered by activeFunds, then append any extra) ─────
+  // ── Annual funds list (ordered by activeFunds only) ────────────────────
   const annualFundKeys = useMemo(() => {
     if (!fundMap) return [];
     const all = Object.keys(fundMap);
     if (!activeFunds?.length) return all;
-    // Preserve activeFunds order, then append funds in data not in activeFunds
-    const inActive = activeFunds.filter((f) => all.includes(f));
-    const extra = all.filter((f) => !activeFunds.includes(f));
-    return [...inActive, ...extra];
+    // Only show funds that are both in activeFunds and in the data
+    return activeFunds.filter((f) => all.includes(f));
   }, [fundMap, activeFunds]);
 
   if (isLoading) {
@@ -134,7 +132,7 @@ export function AnnualReturnsHeatmap({ activeFunds }: { activeFunds?: string[] }
   return (
     <div className="glass-panel overflow-x-auto p-5">
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h4 className="text-sm font-semibold">📅 Retornos</h4>
+        <h4 className="flex items-center gap-2 text-sm font-semibold"><Calendar className="size-4 text-accent-glow" /> Retornos</h4>
         <div className="flex flex-wrap items-center gap-3">
           <PillToggle
             options={[
@@ -190,10 +188,11 @@ export function AnnualReturnsHeatmap({ activeFunds }: { activeFunds?: string[] }
               </thead>
               <tbody>
                 {annualFundKeys.map((fund) => (
-                  <tr key={fund}>
+                  <tr key={fund} className={fund === PORTFOLIO_KEY ? "bg-yellow-400/5" : undefined}>
                     <td
                       className="sticky left-0 max-w-[160px] truncate bg-bg-card px-2 py-1 font-medium"
                       title={fund}
+                      style={fund === PORTFOLIO_KEY ? { color: "#fbbf24", fontWeight: 700 } : undefined}
                     >
                       {fund}
                     </td>
@@ -253,10 +252,11 @@ export function AnnualReturnsHeatmap({ activeFunds }: { activeFunds?: string[] }
               </thead>
               <tbody>
                 {monthlyFunds.map((fund) => (
-                  <tr key={fund}>
+                  <tr key={fund} className={fund === PORTFOLIO_KEY ? "bg-yellow-400/5" : undefined}>
                     <td
                       className="sticky left-0 max-w-[160px] truncate bg-bg-card px-2 py-1 font-medium"
                       title={fund}
+                      style={fund === PORTFOLIO_KEY ? { color: "#fbbf24", fontWeight: 700 } : undefined}
                     >
                       {fund}
                     </td>

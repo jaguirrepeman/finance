@@ -24,7 +24,7 @@ export const CHART_AXIS_TICK = {
 } as const;
 
 /** Portfolio display name constant */
-export const PORTFOLIO_KEY = "📊 Mi Cartera Actual";
+export const PORTFOLIO_KEY = "Mi Cartera";
 
 /** Normalize price series to base‑100 for comparison charts */
 export function normalizeBase100(

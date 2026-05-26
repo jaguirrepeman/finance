@@ -1,4 +1,5 @@
 ﻿import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { FolderOpen, Star } from "lucide-react";
 import { createPortal } from "react-dom";
 import { api } from "@/api/client";
 import type { FundSearchResult } from "@/types";
@@ -31,6 +32,8 @@ interface FundSearchInputProps {
    * client-side and shown first — before and regardless of the API response.
    */
   favoritesData?: Array<{ isin: string; name: string }>;
+  /** ISINs that should be hidden from the dropdown (already added). */
+  excludeIsins?: string[];
 }
 
 export function FundSearchInput({
@@ -41,7 +44,13 @@ export function FundSearchInput({
   portfolioIsins,
   favoriteIsins,
   favoritesData,
+  excludeIsins,
 }: FundSearchInputProps) {
+  const excludeSet = useMemo(
+    () => new Set(excludeIsins ?? []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [excludeIsins?.join(",")],
+  );
   // Stabilize set references — only rebuild when the serialized list changes
   const allPortfolioIsins = useMemo(
     () => new Set([...(portfolioIsins ?? [])]),
@@ -75,6 +84,20 @@ export function FundSearchInput({
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  /** When favoritesData is available, build a favourites-only list for
+   *  empty / very-short queries so users see favourites immediately. */
+  const buildFavoritesOnlyList = useCallback((): FundSearchResult[] => {
+    if (!favoritesData?.length) return [];
+    return favoritesData
+      .filter((f) => !excludeSet.has(f.isin))
+      .map((f) => ({
+        isin: f.isin,
+        name: f.name,
+        in_portfolio: allPortfolioIsins.has(f.isin),
+      }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [favoritesData, allPortfolioIsins, excludeSet]);
+
   /**
    * Build the final display list:
    *  1. Favorites matching the query — client-side, instant, always first
@@ -106,7 +129,7 @@ export function FundSearchInput({
       // Sort API results: portfolio > other priority ISINs > rest
       const pSet = new Set(allPriorityIsins);
       const apiSorted = [...apiResults]
-        .filter((r) => !clientFavIsins.has(r.isin)) // dedup
+        .filter((r) => !clientFavIsins.has(r.isin) && !excludeSet.has(r.isin)) // dedup + exclude
         .sort((a, b) => {
           const aScore =
             (a.in_portfolio || allPortfolioIsins.has(a.isin) ? 2 : 0) +
@@ -117,10 +140,13 @@ export function FundSearchInput({
           return bScore - aScore;
         });
 
-      return [...clientFavMatches, ...apiSorted];
+      return [
+        ...clientFavMatches.filter((f) => !excludeSet.has(f.isin)),
+        ...apiSorted,
+      ];
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [allPortfolioIsins, allFavoriteIsins, allPriorityIsins, favoritesData],
+    [allPortfolioIsins, allFavoriteIsins, allPriorityIsins, favoritesData, excludeSet],
   );
 
   // Keep buildDisplayList in a ref so the SEARCH effect can always use the
@@ -130,6 +156,11 @@ export function FundSearchInput({
   useEffect(() => {
     buildDisplayListRef.current = buildDisplayList;
   }, [buildDisplayList]);
+
+  const buildFavoritesOnlyListRef = useRef(buildFavoritesOnlyList);
+  useEffect(() => {
+    buildFavoritesOnlyListRef.current = buildFavoritesOnlyList;
+  }, [buildFavoritesOnlyList]);
 
   /** Recalculate dropdown position relative to the input element */
   const updateDropdownPosition = useCallback(() => {
@@ -150,8 +181,25 @@ export function FundSearchInput({
   useEffect(() => {
     if (query.length < 2) {
       rawApiResultsRef.current = [];
-      setResults([]);
-      setShowDropdown(false);
+      // If we have favourites, still show them when query is short
+      if (query.length === 0) {
+        // Handled by onFocus — just reset API results
+        setResults((prev) => {
+          const favOnly = buildFavoritesOnlyListRef.current();
+          return favOnly.length ? favOnly : prev.length ? [] : prev;
+        });
+      } else {
+        // 1 char: show matching favourites client-side
+        const matched = buildDisplayListRef.current([], query);
+        if (matched.length) {
+          setResults(matched);
+          updateDropdownPosition();
+          setShowDropdown(true);
+        } else {
+          setResults([]);
+          setShowDropdown(false);
+        }
+      }
       return;
     }
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -223,13 +271,23 @@ export function FundSearchInput({
   const handleSelect = (fund: FundSearchResult) => {
     onSelect(fund);
     setQuery("");
-    setShowDropdown(false);
-    setResults([]);
     rawApiResultsRef.current = [];
     // Brief checkmark feedback
     setAddedIsin(fund.isin);
     if (feedbackRef.current) clearTimeout(feedbackRef.current);
     feedbackRef.current = setTimeout(() => setAddedIsin(null), 1500);
+    // Keep dropdown open immediately with favorites (input stays focused)
+    const favOnly = buildFavoritesOnlyListRef.current().filter(
+      (f) => f.isin !== fund.isin && !excludeSet.has(f.isin),
+    );
+    if (favOnly.length > 0) {
+      setResults(favOnly);
+      updateDropdownPosition();
+      setShowDropdown(true);
+    } else {
+      setResults([]);
+      setShowDropdown(false);
+    }
   };
 
   return (
@@ -243,6 +301,14 @@ export function FundSearchInput({
           if (results.length > 0) {
             updateDropdownPosition();
             setShowDropdown(true);
+          } else if (favoritesData?.length) {
+            // Show favourites immediately when user first focuses the input
+            const favOnly = buildFavoritesOnlyList();
+            if (favOnly.length) {
+              setResults(favOnly);
+              updateDropdownPosition();
+              setShowDropdown(true);
+            }
           }
         }}
         placeholder={placeholder}
@@ -287,10 +353,10 @@ export function FundSearchInput({
                 >
                   {/* Priority icon */}
                   {isPortfolio && (
-                    <span className="shrink-0 text-sm" title="En tu cartera">📁</span>
+                    <span className="shrink-0 text-accent-glow" title="En tu cartera"><FolderOpen className="size-4" /></span>
                   )}
                   {!isPortfolio && isFavorite && (
-                    <span className="shrink-0 text-sm" title="Favorito">⭐</span>
+                    <span className="shrink-0 text-yellow-400" title="Favorito"><Star className="size-4 fill-yellow-400" /></span>
                   )}
                   {!isPortfolio && !isFavorite && (
                     <span className="shrink-0 w-5" />

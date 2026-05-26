@@ -13,6 +13,7 @@ const TABS = [
   { to: "/simulator", label: "Proyección" },
   { to: "/withdrawals", label: "Retiradas" },
   { to: "/portfolios", label: "Carteras" },
+  { to: "/favoritos", label: "Favoritos" },
   { to: "/providers", label: "Proveedores" },
 ] as const;
 

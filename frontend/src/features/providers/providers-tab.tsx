@@ -1,4 +1,6 @@
 import { useState, useMemo } from "react";
+import type { ReactNode } from "react";
+import { RefreshCw, Info } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { Spinner } from "@/components/ui";
@@ -111,25 +113,50 @@ function StatusBadge({ status }: { status: ProviderStatus }) {
       </span>
     );
   }
+  const badges: ReactNode[] = [];
   if (status.is_fresh) {
-    return (
-      <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-[11px] text-green-400">
+    badges.push(
+      <span key="fresh" className="rounded-full bg-green-500/20 px-2 py-0.5 text-[11px] text-green-400">
         Actualizado
       </span>
     );
-  }
-  if (status.is_stale) {
-    return (
-      <span className="rounded-full bg-yellow-500/20 px-2 py-0.5 text-[11px] text-yellow-400">
+  } else if (status.is_stale) {
+    badges.push(
+      <span key="stale" className="rounded-full bg-yellow-500/20 px-2 py-0.5 text-[11px] text-yellow-400">
         Caché expirada
       </span>
     );
+  } else {
+    badges.push(
+      <span key="nocache" className="rounded-full bg-gray-500/20 px-2 py-0.5 text-[11px] text-text-secondary">
+        Sin caché
+      </span>
+    );
   }
-  return (
-    <span className="rounded-full bg-gray-500/20 px-2 py-0.5 text-[11px] text-text-secondary">
-      Sin caché
-    </span>
-  );
+  if (status.sparse_warning) {
+    const gap = status.avg_gap_days != null ? ` (≈${status.avg_gap_days}d)` : "";
+    badges.push(
+      <span
+        key="sparse"
+        title={`Datos no diarios: intervalo medio${gap} entre observaciones`}
+        className="rounded-full bg-orange-500/20 px-2 py-0.5 text-[11px] text-orange-400"
+      >
+        ⚠ No diario{gap}
+      </span>
+    );
+  }
+  if (status.missing_today) {
+    badges.push(
+      <span
+        key="staledata"
+        title="El último dato tiene más de 7 días de antigüedad"
+        className="rounded-full bg-red-500/20 px-2 py-0.5 text-[11px] text-red-400"
+      >
+        ⚠ Datos atrasados
+      </span>
+    );
+  }
+  return <div className="flex flex-wrap gap-1">{badges}</div>;
 }
 
 function RowsBar({ rows }: { rows: number }) {
@@ -246,7 +273,7 @@ export function ProvidersTab() {
             onClick={() => refetch()}
             className="glass-panel-sm flex items-center gap-2 px-3 py-1.5 text-xs text-text-secondary hover:text-white"
           >
-            🔄 Actualizar estado
+            <RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Actualizar estado
           </button>
         </div>
 
@@ -404,7 +431,7 @@ export function ProvidersTab() {
                             "transition-colors",
                           )}
                         >
-                          {isRefreshing ? "⏳ Actualizando..." : "🔄 Actualizar"}
+                          {isRefreshing ? "Actualizando..." : <><RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Actualizar</>}
                         </button>
                         {!isRefreshing && (
                           <DownloadByProviderButtons
@@ -426,7 +453,7 @@ export function ProvidersTab() {
 
       {/* Info box */}
       <div className="glass-panel p-4 text-xs text-text-secondary">
-        <p className="mb-1 font-semibold text-white">ℹ️ Cómo funciona</p>
+        <p className="mb-1 font-semibold text-white"><Info className="inline size-3.5 align-text-bottom mr-1" /> Cómo funciona</p>
         <ul className="list-disc space-y-1 pl-4">
           <li>
             Los datos de historial NAV se descargan de <strong className="text-white">Finect</strong> (prioridad),{" "}

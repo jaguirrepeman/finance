@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link2 } from "lucide-react";
 import { PillToggle, HoverTooltip } from "@/components/ui";
 
 interface HeatmapProps {
@@ -48,8 +49,9 @@ export function CorrelationHeatmap({ labels, matrix }: HeatmapProps) {
   return (
     <div className="glass-panel overflow-x-auto p-5">
       <div className="mb-4 flex items-center justify-between">
-        <h4 className="text-sm font-semibold">
-          🔗 Correlación (Pearson)
+        <h4 className="flex items-center gap-2 text-sm font-semibold">
+          <Link2 className="size-4 text-accent-glow" />
+          Correlación (Pearson)
         </h4>
         <PillToggle
           options={[

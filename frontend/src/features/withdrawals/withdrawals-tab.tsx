@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { BarChart2, Wallet, Scissors, RefreshCw, Euro, ClipboardList, Lightbulb, HelpCircle, AlertTriangle } from "lucide-react";
 import { Spinner, MetricCard } from "@/components/ui";
 import { fmtEur, signColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -176,7 +177,7 @@ export function WithdrawalsTab() {
           onClick={() => setShowExplainer(!showExplainer)}
           className="flex w-full items-center justify-between text-left"
         >
-          <h3 className="font-semibold">❓ ¿Cómo funciona?</h3>
+          <h3 className="font-semibold"><HelpCircle className="inline size-4 align-text-bottom mr-1.5" /> ¿Cómo funciona?</h3>
           <span className="text-text-secondary">
             {showExplainer ? "▲" : "▼"}
           </span>
@@ -185,7 +186,8 @@ export function WithdrawalsTab() {
           <div className="mt-4 space-y-3 text-sm text-text-secondary">
             <p>
               <strong className="text-text-primary">FIFO (First In, First Out):</strong>{" "}
-              Al vender participaciones, se venden primero las más antiguas.
+              Al vender participaciones, se venden primero las más antiguas en orden
+              cronológico estricto. Este es el orden que exige Hacienda sin planificación.
               La ganancia patrimonial tributa en el IRPF como renta del ahorro.
             </p>
             <p>
@@ -196,10 +198,10 @@ export function WithdrawalsTab() {
             <p>
               <strong className="text-text-primary">Traspasos (Art. 94 LIRPF):</strong>{" "}
               Los traspasos entre fondos de inversión españoles/UCITS no tributan.
-              Permite diferir la ganancia fiscal al mover el capital.
+              Permite diferir la ganancia fiscal al mover el capital. Los ETFs NO son traspasables.
             </p>
             <p>
-              <strong className="text-orange-400">⚠️ ETFs y ETPs (no traspasables):</strong>{" "}
+              <strong className="text-orange-400"><AlertTriangle className="inline size-3.5 align-text-bottom mr-1" />ETFs y ETPs (no traspasables):</strong>{" "}
               Los ETFs (iShares Bitcoin, Physical Gold, etc.) cotizan en bolsa y{" "}
               <strong>no se pueden traspasar</strong> según la legislación española.
               Solo pueden reembolsarse directamente, tributando siempre por la ganancia.
@@ -208,8 +210,10 @@ export function WithdrawalsTab() {
             </p>
             <p>
               <strong className="text-text-primary">Estrategia combinada:</strong>{" "}
-              Primero traspasar los lotes con más ganancia latente, luego reembolsar
-              los lotes con menor ganancia = menor factura fiscal.
+              El optimizador NO respeta el orden cronológico puro. En su lugar, analiza
+              todos los lotes por % de ganancia y elige inteligentemente cuáles vender
+              (los de menor ganancia) y cuáles traspasar (los de mayor ganancia). Esto
+              minimiza el impuesto total al aprovechar que los traspasos no tributan.
             </p>
           </div>
         )}
@@ -217,8 +221,9 @@ export function WithdrawalsTab() {
 
       {/* Transfer analysis table */}
       <div className="glass-panel overflow-x-auto p-5">
-        <h3 className="mb-1 font-semibold">
-          🔄 Análisis de Ganancia Latente por Fondo
+        <h3 className="mb-1 flex items-center gap-2 font-semibold">
+          <RefreshCw className="size-4 text-accent-glow" />
+          Análisis de Ganancia Latente por Fondo
         </h3>
         <p className="mb-4 text-xs text-text-secondary">
           Muestra cuánta ganancia acumulada tiene cada fondo y cuánto impuesto pagarías
@@ -326,8 +331,9 @@ export function WithdrawalsTab() {
       {/* Combined strategy: transfer + reimburse */}
       <div className="glass-panel space-y-4 p-5">
         <div>
-          <h3 className="font-semibold">
-            💶 Simulador de Retirada
+          <h3 className="flex items-center gap-2 font-semibold">
+            <Euro className="size-4 text-accent-glow" />
+            Simulador de Retirada
           </h3>
           <p className="mt-1 text-sm text-text-secondary">
             Calcula el plan fiscal óptimo para retirar una cantidad: primero traspasa los lotes con
@@ -375,8 +381,9 @@ export function WithdrawalsTab() {
       {/* Simple FIFO withdrawal */}
       <div className="glass-panel space-y-4 p-5">
         <div>
-          <h3 className="font-semibold">
-            📊 Reembolso Directo sin Estrategia (FIFO puro)
+          <h3 className="flex items-center gap-2 font-semibold">
+            <BarChart2 className="size-4 text-accent-glow" />
+            Reembolso Directo sin Estrategia (FIFO puro)
           </h3>
           <p className="mt-1 text-xs text-text-secondary">
             Vende directamente los lotes más antiguos primero (normativa FIFO), sin ninguna
@@ -462,7 +469,7 @@ function TraspasoResult({
           return (
             <div className="rounded-lg border border-yellow-400/30 bg-yellow-400/8 px-4 py-3 text-sm">
               <p className="font-semibold text-yellow-400">
-                ⚠️ Liquidez insuficiente: solo se pueden retirar {fmtEur(directWithdrawn)}
+                <AlertTriangle className="inline size-3.5 align-text-bottom mr-1" />Liquidez insuficiente: solo se pueden retirar {fmtEur(directWithdrawn)}
               </p>
               <p className="mt-1 text-xs text-text-secondary">
                 El portfolio no tiene suficientes activos con precio conocido para cubrir{" "}
@@ -479,8 +486,11 @@ function TraspasoResult({
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-red-400/20 bg-red-400/5 p-4">
           <h5 className="mb-2 text-xs font-semibold uppercase text-red-400">
-            Venta Directa (FIFO)
+            Venta Directa — FIFO Cronológico
           </h5>
+          <p className="mb-2 text-[10px] text-text-secondary">
+            Vende lotes en orden estricto de fecha de compra (sin planificación fiscal)
+          </p>
           <div className="space-y-1 text-sm">
             <div className="flex justify-between">
               <span className="text-text-secondary">Ganancia</span>
@@ -501,12 +511,40 @@ function TraspasoResult({
               </span>
             </div>
           </div>
+          {/* Gain/loss breakdown */}
+          {(directo.ganancias_brutas != null || directo.perdidas_brutas != null) && (
+            <div className="mt-3 border-t border-red-400/10 pt-2 space-y-0.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Ganancias brutas</span>
+                <span className="tabular-nums text-green-400">+{fmtEur(directo.ganancias_brutas ?? 0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Pérdidas brutas</span>
+                <span className="tabular-nums text-red-400">{fmtEur(directo.perdidas_brutas ?? 0)}</span>
+              </div>
+              {(directo.compensacion_aplicada ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-text-secondary">Compensación aplicada</span>
+                  <span className="tabular-nums text-yellow-400">{fmtEur(directo.compensacion_aplicada ?? 0)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-semibold">
+                <span className="text-text-secondary">Saldo neto (tributa)</span>
+                <span className={cn("tabular-nums", (directo.saldo_neto ?? 0) > 0 ? "text-red-400" : "text-green-400")}>
+                  {fmtEur(directo.saldo_neto ?? 0)}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="rounded-lg border border-green-400/20 bg-green-400/5 p-4">
           <h5 className="mb-2 text-xs font-semibold uppercase text-green-400">
             Traspaso + Reembolso (Optimizado)
           </h5>
+          <p className="mb-2 text-[10px] text-text-secondary">
+            Traspasa lotes antiguos con alta ganancia, reembolsa lotes recientes con menor ganancia
+          </p>
           <div className="space-y-1 text-sm">
             <div className="flex justify-between">
               <span className="text-text-secondary">Ganancia</span>
@@ -527,6 +565,31 @@ function TraspasoResult({
               </span>
             </div>
           </div>
+          {/* Gain/loss breakdown */}
+          {(optimizado.ganancias_brutas != null || optimizado.perdidas_brutas != null) && (
+            <div className="mt-3 border-t border-green-400/10 pt-2 space-y-0.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Ganancias brutas</span>
+                <span className="tabular-nums text-green-400">+{fmtEur(optimizado.ganancias_brutas ?? 0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Pérdidas brutas</span>
+                <span className="tabular-nums text-red-400">{fmtEur(optimizado.perdidas_brutas ?? 0)}</span>
+              </div>
+              {(optimizado.compensacion_aplicada ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-text-secondary">Compensación aplicada</span>
+                  <span className="tabular-nums text-yellow-400">{fmtEur(optimizado.compensacion_aplicada ?? 0)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-semibold">
+                <span className="text-text-secondary">Saldo neto (tributa)</span>
+                <span className={cn("tabular-nums", (optimizado.saldo_neto ?? 0) > 0 ? "text-red-400" : "text-green-400")}>
+                  {fmtEur(optimizado.saldo_neto ?? 0)}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -548,7 +611,7 @@ function TraspasoResult({
       {/* Non-traspasable warning */}
       {data.non_traspasable_isins && data.non_traspasable_isins.length > 0 && (
         <div className="rounded-lg border border-orange-400/30 bg-orange-400/8 p-3 text-sm">
-          <span className="font-semibold text-orange-400">⚠️ ETFs/ETPs en cartera (no traspasables): </span>
+          <span className="font-semibold text-orange-400"><AlertTriangle className="inline size-3.5 align-text-bottom mr-1" />ETFs/ETPs en cartera (no traspasables): </span>
           <span className="text-text-secondary">
             Los siguientes productos <strong className="text-orange-400">no pueden traspasarse</strong>{" "}
             según la legislación española y deben reembolsarse directamente (tributan siempre):
@@ -565,7 +628,7 @@ function TraspasoResult({
 
       {/* Strategy explanation */}
       <div className="rounded-lg border border-border-glass/50 bg-white/3 p-3 text-xs text-text-secondary space-y-1">
-        <p className="font-semibold text-text-primary text-sm">📋 Estrategia del algoritmo</p>
+        <p className="font-semibold text-text-primary text-sm"><ClipboardList className="inline size-3.5 align-text-bottom mr-1" /> Estrategia del algoritmo</p>
         <p>
           El plan ordena todos los lotes por <strong className="text-text-primary">ganancia % ascendente</strong>:
           primero se venden los lotes con menor plusvalía (o pérdidas), que generan menos impuestos.
@@ -576,6 +639,27 @@ function TraspasoResult({
           fondos de inversión, ya que los ETFs no pueden traspasarse y conviene liquidarlos antes
           para preservar la opción de traspaso exento en fondos.
         </p>
+        <p>
+          <strong className="text-text-primary">Compensación de pérdidas (Art. 49.1.b Ley 35/2006):</strong>{" "}
+          Los lotes con pérdidas latentes se venden (en vez de traspasarse) para que la pérdida
+          realizada compense las ganancias del mismo ejercicio fiscal, reduciendo la base
+          imponible del ahorro. Solo tributa el saldo neto positivo.
+        </p>
+      </div>
+
+      {/* Legal compliance note */}
+      <div className="rounded-lg border border-blue-400/20 bg-blue-400/5 p-3 text-xs text-text-secondary space-y-1">
+        <p className="font-semibold text-blue-400 text-[11px]">
+          <Lightbulb className="inline size-3 align-text-bottom mr-1" />
+          Normativa española aplicada
+        </p>
+        <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+          <li><strong>Art. 94 Ley 35/2006 (LIRPF):</strong> Traspasos entre IICs exentos de tributación</li>
+          <li><strong>Art. 37.1.c:</strong> Ganancia = Valor transmisión − Valor adquisición (método FIFO)</li>
+          <li><strong>Art. 49.1.b:</strong> Compensación automática de ganancias y pérdidas patrimoniales en la misma base</li>
+          <li><strong>Art. 66:</strong> Tramos de la base del ahorro (19%–28%)</li>
+          <li><strong>Art. 33.5.f:</strong> Norma anti-aplicación: pérdidas no deducibles si se recompran valores homogéneos en 2 meses (ETFs) o 1 año (fondos)</li>
+        </ul>
       </div>
 
       {/* Plan de traspasos — grouped by fund */}
@@ -766,8 +850,8 @@ function LossHarvestingSection({
     <div className="space-y-3">
       <h5 className="text-xs font-semibold uppercase text-text-secondary">
         {isGainHarvest
-          ? "💰 Harvest Gains — Aprovechar pérdidas del plan"
-          : "🌾 Tax-Loss Harvesting — Compensar ganancias"}
+          ? <><Wallet className="inline size-3.5 align-text-bottom mr-1" /> Harvest Gains — Aprovechar pérdidas del plan</>
+          : <><Scissors className="inline size-3.5 align-text-bottom mr-1" /> Tax-Loss Harvesting — Compensar ganancias</>}
       </h5>
 
       {/* Summary card */}
@@ -942,7 +1026,7 @@ function LossHarvestingSection({
               </div>
               {!isGainHarvest && (
                 <div className="mt-1 text-[10px] text-yellow-400/80">
-                  ⚠️ Norma antiaplicación (Art. 33.5.f): no recomprar valores homogéneos
+                  <AlertTriangle className="inline size-3 align-text-bottom mr-1" />Norma antiaplicación (Art. 33.5.f): no recomprar valores homogéneos
                   en <strong>{c.antiaplicacion_plazo}</strong>
                 </div>
               )}
@@ -955,7 +1039,7 @@ function LossHarvestingSection({
       {!isGainHarvest && (
         <div className="rounded-lg border border-yellow-400/20 bg-yellow-400/5 p-3 text-xs text-text-secondary space-y-1">
           <p className="font-semibold text-yellow-400 text-sm">
-            ⚠️ Norma antiaplicación (Art. 33.5.f Ley 35/2006)
+            <AlertTriangle className="inline size-3.5 align-text-bottom mr-1" />Norma antiaplicación (Art. 33.5.f Ley 35/2006)
           </p>
           <p>
             Las pérdidas patrimoniales <strong className="text-text-primary">no son deducibles</strong>{" "}
@@ -980,7 +1064,7 @@ function LossHarvestingSection({
       {isGainHarvest && (
         <div className="rounded-lg border border-green-400/20 bg-green-400/5 p-3 text-xs text-text-secondary space-y-1">
           <p className="font-semibold text-green-400 text-sm">
-            💡 ¿Por qué vender ganancias?
+            <Lightbulb className="inline size-3.5 align-text-bottom mr-1" /> ¿Por qué vender ganancias?
           </p>
           <p>
             Las <strong className="text-text-primary">pérdidas del plan base</strong> compensan
@@ -993,7 +1077,7 @@ function LossHarvestingSection({
             mercado de los lotes <strong className="text-green-400">sin tributar por la plusvalía</strong>.
           </p>
           <p className="text-yellow-400/80 mt-1">
-            ⚠️ La norma antiaplicación (Art. 33.5.f) aplica a las pérdidas del plan base:
+            <AlertTriangle className="inline size-3 align-text-bottom mr-1" />La norma antiaplicación (Art. 33.5.f) aplica a las pérdidas del plan base:
             no recompres los valores vendidos a pérdida en 2 meses (ETFs) / 1 año (fondos).
           </p>
         </div>

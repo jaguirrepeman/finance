@@ -96,6 +96,7 @@ export interface PositionItem {
   Ganancia_Euros?: number;
   Ganancia_Pct?: number;
   finect_url?: string;
+  is_etf?: boolean;
 }
 
 /** Fund detail response from /api/portfolio/fund/{isin}/details */
@@ -288,6 +289,11 @@ export interface TraspasoOptimizeResult {
     withdrawn_amount?: number;
     neto_recibido: number;
     detalle: Array<Record<string, unknown>>;
+    /** Desglose ganancias/pérdidas (Art. 49.1.b Ley 35/2006) */
+    ganancias_brutas?: number;
+    perdidas_brutas?: number;
+    saldo_neto?: number;
+    compensacion_aplicada?: number;
   };
   /** Escenario fiscal optimizado mediante traspasos */
   escenario_optimizado: {
@@ -296,6 +302,11 @@ export interface TraspasoOptimizeResult {
     withdrawn_amount?: number;
     neto_recibido: number;
     detalle: Array<Record<string, unknown>>;
+    /** Desglose ganancias/pérdidas (Art. 49.1.b Ley 35/2006) */
+    ganancias_brutas?: number;
+    perdidas_brutas?: number;
+    saldo_neto?: number;
+    compensacion_aplicada?: number;
   };
   ahorro_fiscal: number;
   ahorro_fiscal_pct: number;
@@ -614,4 +625,10 @@ export interface ProviderStatus {
   no_data: boolean;
   /** Per-provider row counts: { Finect: 1234, YahooFinance: 1000, FMP: 0 } */
   providers?: Record<string, number>;
+  /** Average calendar days between consecutive data points */
+  avg_gap_days?: number | null;
+  /** True if avg_gap_days > 2.5 (data is not truly daily) */
+  sparse_warning?: boolean;
+  /** True if last data point is > 7 days ago */
+  missing_today?: boolean;
 }

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { ExternalLink, ClipboardList, RefreshCw, Target, Globe } from "lucide-react";
 import { Spinner } from "@/components/ui";
 import {
   useDetails,
@@ -149,7 +150,7 @@ export function DetailsTab() {
             rel="noreferrer"
             className="rounded-lg border border-accent-glow/30 bg-accent-glow/15 px-3 py-1.5 text-xs text-accent-glow"
           >
-            🔗 Ver en Finect
+            <ExternalLink className="inline size-3.5 align-text-bottom mr-1" /> Ver en Finect
           </a>
         )}
       </div>
@@ -159,7 +160,7 @@ export function DetailsTab() {
         <div className="glass-panel space-y-4 p-6">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="font-semibold">
-              📋 {selectedKey}
+              <ClipboardList className="inline size-4 align-text-bottom mr-1.5" />{selectedKey}
               {selectedFund.isin && (
                 <span className="ml-2.5 text-xs font-normal text-text-secondary">
                   {selectedFund.isin}
@@ -172,7 +173,7 @@ export function DetailsTab() {
                 disabled={refreshMutation.isPending}
                 className="rounded-md border border-accent-glow/30 bg-accent-glow/15 px-3 py-1 text-xs text-accent-glow disabled:opacity-50"
               >
-                🔄 Recargar de Finect
+                <RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Recargar de Finect
               </button>
             )}
           </div>
@@ -263,7 +264,7 @@ export function DetailsTab() {
           {/* Sector + Geography cards */}
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             <div className="glass-panel p-6">
-              <h3 className="mb-5 font-semibold">🎯 Exposición Sectorial</h3>
+              <h3 className="mb-5 flex items-center gap-2 font-semibold"><Target className="size-4 text-accent-glow" /> Exposición Sectorial</h3>
               <ComparisonBars
                 data={sectors}
                 benchmarkData={benchSectors}
@@ -271,8 +272,8 @@ export function DetailsTab() {
               />
             </div>
             <div className="glass-panel p-6">
-              <h3 className="mb-5 font-semibold">
-                🌍 Exposición Geográfica
+              <h3 className="mb-5 flex items-center gap-2 font-semibold">
+                <Globe className="size-4 text-accent-glow" /> Exposición Geográfica
               </h3>
               <ComparisonBars
                 data={regions}

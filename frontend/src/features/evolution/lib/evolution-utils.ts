@@ -190,73 +190,80 @@ export function computeFundMetrics(
   };
 }
 
-/** Compute Pearson correlation matrix client-side */
+/**
+ * Compute Pearson correlation matrix client-side using DAILY log returns.
+ *
+ * Uses ONLY dates where a fund has a REAL price observation — no imputation,
+ * no forward-fill, no invented data.  For each pair of funds the intersection
+ * of their actual trading dates is used.
+ *
+ * A date is included in a fund's return series only when CONSECUTIVE real
+ * prices exist on that date and the previous date in that fund's own calendar.
+ */
 export function computeCorrelationMatrix(
   datasets: Record<string, Array<{ date: string; price: number }>>,
   funds: string[],
   start: Date,
   end: Date,
 ): { labels: string[]; matrix: Record<string, Record<string, number | null>> } {
-  // Build log-returns indexed by date for each fund
-  const returnsMap: Record<string, Map<string, number>> = {};
+  // ── Step 1: build daily log-return maps from real price observations only ─
+  const returnMaps: Record<string, Map<string, number>> = {};
   const validFunds: string[] = [];
 
   for (const fund of funds) {
     const series = (datasets[fund] ?? [])
-      .filter((p) => {
-        const d = new Date(p.date);
-        return d >= start && d <= end;
-      })
+      .filter((p) => { const d = new Date(p.date); return d >= start && d <= end; })
       .sort((a, b) => a.date.localeCompare(b.date));
 
     if (series.length < 6) continue;
 
-    const returns = new Map<string, number>();
+    // Compute log return for each consecutive pair of REAL observations.
+    // The return is keyed by the LATER date so two funds can be intersected.
+    const rm = new Map<string, number>();
     for (let i = 1; i < series.length; i++) {
-      if (series[i - 1].price > 0) {
-        returns.set(
-          series[i].date,
-          Math.log(series[i].price / series[i - 1].price),
-        );
+      const prev = series[i - 1].price;
+      const curr = series[i].price;
+      if (prev > 0 && curr > 0) {
+        rm.set(series[i].date, Math.log(curr / prev));
       }
     }
-    returnsMap[fund] = returns;
+
+    if (rm.size < 5) continue;
+    returnMaps[fund] = rm;
     validFunds.push(fund);
   }
 
+  if (validFunds.length < 2) {
+    const singleMatrix: Record<string, Record<string, number | null>> = {};
+    for (const f of validFunds) singleMatrix[f] = { [f]: 1.0 };
+    return { labels: validFunds, matrix: singleMatrix };
+  }
+
+  // ── Step 2: Pearson on strict intersection of real return dates ───────────
   const matrix: Record<string, Record<string, number | null>> = {};
 
   for (const f1 of validFunds) {
     matrix[f1] = {};
     for (const f2 of validFunds) {
-      if (f1 === f2) {
-        matrix[f1][f2] = 1.0;
-        continue;
-      }
+      if (f1 === f2) { matrix[f1][f2] = 1.0; continue; }
 
-      // Find common dates
-      const r1 = returnsMap[f1];
-      const r2 = returnsMap[f2];
+      const r1 = returnMaps[f1];
+      const r2 = returnMaps[f2];
       const common: Array<[number, number]> = [];
 
-      for (const [date, val1] of r1) {
-        const val2 = r2.get(date);
-        if (val2 != null) common.push([val1, val2]);
+      // Only dates where BOTH funds have a real return observation
+      for (const [date, v1] of r1) {
+        const v2 = r2.get(date);
+        if (v2 != null) common.push([v1, v2]);
       }
 
-      if (common.length < 30) {
-        matrix[f1][f2] = null;
-        continue;
-      }
+      if (common.length < 20) { matrix[f1][f2] = null; continue; }
 
-      // Pearson correlation
       const n = common.length;
       const m1 = common.reduce((s, [a]) => s + a, 0) / n;
       const m2 = common.reduce((s, [, b]) => s + b, 0) / n;
 
-      let num = 0;
-      let d1 = 0;
-      let d2 = 0;
+      let num = 0, d1 = 0, d2 = 0;
       for (const [a, b] of common) {
         num += (a - m1) * (b - m2);
         d1 += (a - m1) ** 2;
@@ -264,10 +271,59 @@ export function computeCorrelationMatrix(
       }
 
       const denom = Math.sqrt(d1 * d2);
-      matrix[f1][f2] =
-        denom > 0 ? Math.round((num / denom) * 10000) / 10000 : null;
+      matrix[f1][f2] = denom > 0 ? Math.round((num / denom) * 10000) / 10000 : null;
     }
   }
 
   return { labels: validFunds, matrix };
+}
+
+/* ── Substitution rule ─────────────────────────────────────────── */
+
+/** Rule that extends a fund's NAV history using a substitute fund.
+ *  The substitute is scaled to connect smoothly at cutoverDate.
+ *  Stored in localStorage under "portfolio-substitutions" so both
+ *  Evolution and Comparar share the same rules.
+ */
+export interface SubstitutionRule {
+  id: string;
+  /** ISIN of the primary fund to extend */
+  fundIsin: string;
+  /** Display name of the primary fund */
+  fundName: string;
+  substituteIsin: string;
+  substituteName: string;
+  /** ISO date — use substitute data BEFORE this date */
+  cutoverDate: string;
+}
+
+export const SUBSTITUTIONS_STORAGE_KEY = "portfolio-substitutions";
+
+/**
+ * Stitch a substitute NAV series before `cutoverDate` onto a primary series.
+ * Scales substitute so the two series connect smoothly at the junction.
+ */
+export function stitchSeries(
+  primary: Array<{ date: string; price: number }>,
+  substitute: Array<{ date: string; price: number }>,
+  cutoverDate: string,
+): Array<{ date: string; price: number }> {
+  if (!primary.length || !substitute.length) return primary;
+  const sorted = [...primary].sort((a, b) => a.date.localeCompare(b.date));
+  const subSorted = [...substitute].sort((a, b) => a.date.localeCompare(b.date));
+
+  // Anchor: first primary point at or after cutoverDate
+  const anchor = sorted.find((p) => p.date >= cutoverDate) ?? sorted[0];
+  // Closest substitute point to anchor date
+  const subAnchor =
+    subSorted.filter((p) => p.date <= anchor.date).at(-1) ?? subSorted[0];
+  if (!subAnchor || subAnchor.price === 0) return primary;
+
+  const scale = anchor.price / subAnchor.price;
+  const prefix = subSorted
+    .filter((p) => p.date < cutoverDate)
+    .map((p) => ({ date: p.date, price: p.price * scale }));
+
+  const primaryAfter = sorted.filter((p) => p.date >= cutoverDate);
+  return [...prefix, ...primaryAfter];
 }

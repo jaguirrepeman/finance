@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { FundSearchInput } from "@/components/ui";
 import type { FundSearchResult } from "@/types";
 import { useAddFund } from "../hooks";
+import { useFavorites } from "@/features/portfolios/hooks";
 
 const FUND_TYPES = [
   "INDEX",
@@ -15,6 +16,7 @@ const FUND_TYPES = [
 
 export function AddFundForm() {
   const addMut = useAddFund();
+  const { data: favorites } = useFavorites();
   const [selectedFund, setSelectedFund] = useState<FundSearchResult | null>(null);
   const [form, setForm] = useState({
     TIPO: "INDEX" as string,
@@ -69,6 +71,8 @@ export function AddFundForm() {
             onSelect={setSelectedFund}
             placeholder="Buscar por nombre o ISIN…"
             className="w-full"
+            favoriteIsins={(favorites ?? []).map((f) => f.isin)}
+            favoritesData={favorites ?? []}
           />
         )}
       </td>
