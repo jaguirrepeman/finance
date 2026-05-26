@@ -58,19 +58,19 @@ echo ""
 echo " IMPORTANTE: Vamos a restaurar TODAS las rutas existentes."
 echo ""
 
-# Configurar las rutas con serve
+# Configurar las rutas con serve (Tailscale 1.98.3)
 echo "   → / → http://localhost:8501 (idealista_bot)"
-sudo tailscale serve https:443 / http://localhost:8501
+sudo tailscale serve / http://localhost:8501
 
 echo "   → /finance → http://localhost:8000 (portfolio tracker)"
-sudo tailscale serve https:443 /finance http://localhost:8000
+sudo tailscale serve /finance http://localhost:8000
 
 echo "   → /hooks → http://localhost:9000 (webhook)"
-sudo tailscale serve https:443 /hooks http://localhost:9000
+sudo tailscale serve /hooks http://localhost:9000
 
 echo ""
 echo " Activando Funnel (acceso público)..."
-sudo tailscale funnel 443 on
+sudo tailscale funnel on
 
 echo ""
 echo " ✔ Rutas añadidas al Funnel."
@@ -107,6 +107,6 @@ echo " Después de configurar, reinicia el webhook:"
 echo "   sudo systemctl restart portfolio-webhook"
 echo ""
 echo " Para añadir más apps en el futuro:"
-echo "   sudo tailscale serve https:443 /ruta http://localhost:PUERTO"
-echo "   sudo tailscale funnel 443 on"
+echo "   sudo tailscale serve /ruta http://localhost:PUERTO"
+echo "   sudo tailscale funnel on"
 echo ""

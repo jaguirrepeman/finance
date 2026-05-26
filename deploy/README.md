@@ -294,14 +294,14 @@ curl https://<host>.tailnet-xxxx.ts.net/finance/api/health
 tailscale funnel status
 
 # Añadir nueva ruta (primero con serve, luego activar funnel)
-sudo tailscale serve https:443 /nueva-app http://localhost:8502
-sudo tailscale funnel 443 on
+sudo tailscale serve /nueva-app http://localhost:8502
+sudo tailscale funnel on
 
 # Desactivar Funnel (deja Tailscale VPN activo)
-sudo tailscale funnel 443 off
+sudo tailscale funnel off
 
 # Reactivar Funnel
-sudo tailscale funnel 443 on
+sudo tailscale funnel on
 ```
 
 ---
@@ -407,12 +407,12 @@ bash ~/Finance/deploy/update.sh
 **Solución rápida (Tailscale 1.98+):**
 ```bash
 # Restaurar todas las rutas con serve
-sudo tailscale serve https:443 / http://localhost:8501
-sudo tailscale serve https:443 /finance http://localhost:8000
-sudo tailscale serve https:443 /hooks http://localhost:9000
+sudo tailscale serve / http://localhost:8501
+sudo tailscale serve /finance http://localhost:8000
+sudo tailscale serve /hooks http://localhost:9000
 
 # Activar Funnel (acceso público)
-sudo tailscale funnel 443 on
+sudo tailscale funnel on
 
 # Verificar
 tailscale funnel status
