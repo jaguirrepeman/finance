@@ -44,7 +44,7 @@ systemctl restart portfolio-tracker (FastAPI en :8000)
 
 2. **Tailscale + Funnel ya configurado** (por idealista_bot)
    - Si aún no lo tienes: `bash ~/idealista_bot/deploy/remote_access.sh`
-   - Verificar: `tailscale serve status` debe mostrar la ruta `/` activa
+   - Verificar: `tailscale funnel status` debe mostrar "Funnel on" con la ruta `/` activa
 
 3. **Git configurado con SSH**
    - Generar clave SSH: `ssh-keygen -t ed25519 -C "raspberry"`
@@ -121,11 +121,16 @@ bash deploy/add_to_funnel.sh
 
 Esto:
 - Verifica que Tailscale está conectado
-- Añade `/finance` → puerto 8000
-- Añade `/hooks` → puerto 9000
+- **Restaura la ruta `/` para idealista_bot** (puerto 8501)
+- Añade `/finance` → puerto 8000 (portfolio tracker)
+- Añade `/hooks` → puerto 9000 (webhook)
 - Muestra la URL pública completa
 
-**Resultado:** El dashboard ya es accesible en `https://<host>.tailnet-xxxx.ts.net/finance`
+**⚠️ IMPORTANTE:** `tailscale serve` sobrescribe la configuración completa, por eso el script restaura TODAS las rutas (incluyendo idealista_bot).
+
+**Resultado:** 
+- Idealista Bot: `https://<host>.tailnet-xxxx.ts.net/`
+- Portfolio Tracker: `https://<host>.tailnet-xxxx.ts.net/finance`
 
 ### Paso 5 — Configurar webhook en GitHub
 
@@ -275,8 +280,8 @@ sudo systemctl restart portfolio-webhook
 systemctl status portfolio-tracker
 systemctl status portfolio-webhook
 
-# Estado de Tailscale Funnel
-tailscale serve status
+# Estado de Tailscale Funnel (Tailscale 1.98+)
+tailscale funnel status
 
 # Health check del API
 curl https://<host>.tailnet-xxxx.ts.net/finance/api/health
@@ -285,11 +290,12 @@ curl https://<host>.tailnet-xxxx.ts.net/finance/api/health
 ### Tailscale Funnel
 
 ```bash
-# Ver configuración actual
-tailscale serve status
+# Ver configuración actual (Tailscale 1.98+)
+tailscale funnel status
 
-# Añadir nueva ruta (ejemplo)
+# Añadir nueva ruta (primero con serve, luego activar funnel)
 sudo tailscale serve https:443 /nueva-app http://localhost:8502
+sudo tailscale funnel 443 on
 
 # Desactivar Funnel (deja Tailscale VPN activo)
 sudo tailscale funnel 443 off
@@ -365,7 +371,7 @@ poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 2. **Verificar que el puerto 9000 está mapeado en Funnel:**
    ```bash
-   tailscale serve status
+   tailscale funnel status
    # Debe mostrar: /hooks → http://127.0.0.1:9000
    ```
 
@@ -392,6 +398,42 @@ tail -50 ~/Finance/logs/deploy.log
 
 # Probar update.sh manualmente
 bash ~/Finance/deploy/update.sh
+```
+
+### Se rompió la URL de idealista_bot tras añadir finance
+
+**Causa:** `tailscale serve` sobrescribe todas las rutas existentes. Si solo añades `/finance`, pierdes la ruta `/` de idealista_bot.
+
+**Solución rápida (Tailscale 1.98+):**
+```bash
+# Restaurar todas las rutas con serve
+sudo tailscale serve https:443 / http://localhost:8501
+sudo tailscale serve https:443 /finance http://localhost:8000
+sudo tailscale serve https:443 /hooks http://localhost:9000
+
+# Activar Funnel (acceso público)
+sudo tailscale funnel 443 on
+
+# Verificar
+tailscale funnel status
+```
+
+**Solución automática:**
+```bash
+# El script add_to_funnel.sh ya restaura todas las rutas
+bash ~/Finance/deploy/add_to_funnel.sh
+```
+
+**Verificar que todo funciona:**
+```bash
+# Debe mostrar "Funnel on" y las 3 rutas
+tailscale funnel status
+
+# Probar idealista_bot
+curl https://raspberrypi.tailf2dda1.ts.net/
+
+# Probar portfolio tracker
+curl https://raspberrypi.tailf2dda1.ts.net/finance/api/health
 ```
 
 ---

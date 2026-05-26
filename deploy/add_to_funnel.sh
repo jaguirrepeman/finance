@@ -41,7 +41,7 @@ echo " ✔ Tailscale está conectado."
 echo ""
 
 # --- Obtener la URL del Funnel actual ---
-FUNNEL_URL=$(tailscale serve status 2>/dev/null | grep -o 'https://[^ ]*' | head -1 || echo "")
+FUNNEL_URL=$(tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1 || echo "")
 if [[ -z "$FUNNEL_URL" ]]; then
     echo " ✘ No hay Funnel activo."
     echo "   Ejecuta primero el script remote_access.sh de idealista_bot:"
@@ -53,20 +53,24 @@ echo " ✔ Funnel activo: $FUNNEL_URL"
 echo ""
 
 # --- Añadir rutas al Funnel ---
-echo " Añadiendo rutas al Funnel..."
+echo " Configurando todas las rutas en el Funnel..."
+echo ""
+echo " IMPORTANTE: Vamos a restaurar TODAS las rutas existentes."
 echo ""
 
-# /finance → portfolio tracker backend (puerto 8000)
-echo "   → /finance → http://localhost:8000"
+# Configurar las rutas con serve
+echo "   → / → http://localhost:8501 (idealista_bot)"
+sudo tailscale serve https:443 / http://localhost:8501
+
+echo "   → /finance → http://localhost:8000 (portfolio tracker)"
 sudo tailscale serve https:443 /finance http://localhost:8000
 
-# /hooks → webhook listener (puerto 9000)
-echo "   → /hooks → http://localhost:9000"
+echo "   → /hooks → http://localhost:9000 (webhook)"
 sudo tailscale serve https:443 /hooks http://localhost:9000
 
 echo ""
-echo " Activando Funnel (si no está ya activo)..."
-sudo tailscale funnel 443 on 2>/dev/null || true
+echo " Activando Funnel (acceso público)..."
+sudo tailscale funnel 443 on
 
 echo ""
 echo " ✔ Rutas añadidas al Funnel."
@@ -84,7 +88,7 @@ echo "║  Webhook:         ${FUNNEL_URL%/}/hooks/deploy-finance"
 echo "║                                                              ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Verificar:                                                  ║"
-echo "║    tailscale serve status                                   ║"
+echo "║    tailscale funnel status                                  ║"
 echo "║    curl ${FUNNEL_URL%/}/finance/api/health"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
@@ -104,4 +108,5 @@ echo "   sudo systemctl restart portfolio-webhook"
 echo ""
 echo " Para añadir más apps en el futuro:"
 echo "   sudo tailscale serve https:443 /ruta http://localhost:PUERTO"
+echo "   sudo tailscale funnel 443 on"
 echo ""
