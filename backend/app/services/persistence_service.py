@@ -24,9 +24,18 @@ logger = logging.getLogger(__name__)
 
 def _get_db_path() -> Path:
     import os
+    import platform
 
-    local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    base = Path(local_app_data) / "portfolio_tracker" / "cache"
+    # Cross-platform data directory
+    if platform.system() == "Windows":
+        # Use AppData\Local to avoid OneDrive sync locking
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        base = Path(local_app_data) / "portfolio_tracker" / "cache"
+    else:
+        # Linux/macOS: use XDG standard
+        xdg_data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        base = Path(xdg_data_home) / "portfolio_tracker"
+    
     base.mkdir(parents=True, exist_ok=True)
     return base / "portfolio_tracker.db"
 

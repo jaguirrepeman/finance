@@ -1,0 +1,30 @@
+# =============================================================================
+# portfolio-tracker.service — FastAPI backend como servicio systemd
+#
+# Este archivo lo procesa install_service.sh, que sustituye:
+#   __PROJECT_DIR__  →  ruta absoluta al proyecto
+#   __USER__         →  usuario que ejecuta el servicio
+#   __POETRY__       →  ruta al ejecutable de poetry
+# =============================================================================
+[Unit]
+Description=Portfolio Tracker — FastAPI Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__POETRY__ run uvicorn app.main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=__PROJECT_DIR__/backend
+User=__USER__
+Environment=PYTHONUNBUFFERED=1
+Environment=ROOT_PATH=/finance
+Environment=PYTHONPATH=__PROJECT_DIR__/backend
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

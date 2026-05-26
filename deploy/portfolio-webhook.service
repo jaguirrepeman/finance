@@ -1,0 +1,27 @@
+# =============================================================================
+# portfolio-webhook.service — GitHub webhook listener (adnanh/webhook)
+#
+# Este archivo lo procesa install_service.sh, que sustituye:
+#   __PROJECT_DIR__  →  ruta absoluta al proyecto
+#   __USER__         →  usuario que ejecuta el servicio
+# =============================================================================
+[Unit]
+Description=Portfolio Tracker — GitHub Webhook Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/webhook -hooks __PROJECT_DIR__/deploy/hooks.json -port 9000 -verbose
+WorkingDirectory=__PROJECT_DIR__
+User=__USER__
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

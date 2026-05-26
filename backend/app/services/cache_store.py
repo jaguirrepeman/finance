@@ -68,12 +68,21 @@ class CacheStore:
 
     def __init__(self, db_path: Optional[str | Path] = None) -> None:
         if db_path is None:
-            # Use AppData\Local to avoid OneDrive sync locking the SQLite DB.
+            # Use AppData\Local (Windows) or ~/.local/share (Linux/macOS)
+            # to avoid OneDrive sync locking the SQLite DB.
             # OneDrive holds file locks on synced files which causes
             # "database is locked" errors under concurrent access.
             import os
-            local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-            base = Path(local_app_data) / "portfolio_tracker" / "cache"
+            import platform
+            
+            if platform.system() == "Windows":
+                local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+                base = Path(local_app_data) / "portfolio_tracker" / "cache"
+            else:
+                # Linux/macOS: follow XDG Base Directory spec
+                xdg_data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+                base = Path(xdg_data_home) / "portfolio_tracker"
+            
             base.mkdir(parents=True, exist_ok=True)
             db_path = base / "cache.db"
         self._db_path = Path(db_path)

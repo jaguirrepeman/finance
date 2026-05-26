@@ -67,26 +67,26 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
+# Read ROOT_PATH from environment (for Tailscale Funnel path-based routing)
+ROOT_PATH = os.environ.get("ROOT_PATH", "")
+
 app = FastAPI(
     title="Portfolio Tracker API",
     description="Backend para el dashboard de Portfolio Financiero",
     version="0.3.0",
     lifespan=lifespan,
+    root_path=ROOT_PATH,
 )
 
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
 
+# Permissive CORS for single-user remote access via Tailscale
+# Safe since: private Tailscale network + no auth tokens in CORS-protected headers
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
