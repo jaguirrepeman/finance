@@ -289,7 +289,7 @@ curl https://<host>.tailnet-xxxx.ts.net/finance/api/health
 tailscale serve status
 
 # Añadir nueva ruta (ejemplo)
-sudo tailscale serve --bg /nueva-app http://localhost:8502
+sudo tailscale serve https:443 /nueva-app http://localhost:8502
 
 # Desactivar Funnel (deja Tailscale VPN activo)
 sudo tailscale funnel 443 off

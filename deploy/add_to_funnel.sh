@@ -58,11 +58,15 @@ echo ""
 
 # /finance → portfolio tracker backend (puerto 8000)
 echo "   → /finance → http://localhost:8000"
-sudo tailscale serve --bg /finance http://localhost:8000
+sudo tailscale serve https:443 /finance http://localhost:8000
 
 # /hooks → webhook listener (puerto 9000)
 echo "   → /hooks → http://localhost:9000"
-sudo tailscale serve --bg /hooks http://localhost:9000
+sudo tailscale serve https:443 /hooks http://localhost:9000
+
+echo ""
+echo " Activando Funnel (si no está ya activo)..."
+sudo tailscale funnel 443 on 2>/dev/null || true
 
 echo ""
 echo " ✔ Rutas añadidas al Funnel."
@@ -93,6 +97,11 @@ echo " 4. Secret: (genera uno aleatorio y cópialo en deploy/hooks.json)"
 echo " 5. Events: Just the push event"
 echo " 6. Active: ✓"
 echo ""
+echo " Generar secret: openssl rand -hex 32"
+echo ""
 echo " Después de configurar, reinicia el webhook:"
 echo "   sudo systemctl restart portfolio-webhook"
+echo ""
+echo " Para añadir más apps en el futuro:"
+echo "   sudo tailscale serve https:443 /ruta http://localhost:PUERTO"
 echo ""
