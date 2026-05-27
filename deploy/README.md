@@ -343,6 +343,51 @@ sudo tailscale funnel reset
 
 ## Troubleshooting
 
+### 502 en /finance (copy/paste en Raspberry)
+
+Si `curl -i http://127.0.0.1:8000/api/health` falla, el problema es el backend.
+Si ese curl local funciona pero la URL pública da 502, el problema es Funnel/routing.
+
+```bash
+# 0) Ir al proyecto
+cd ~/Finance
+
+# 1) Actualizar código
+git pull
+
+# 2) Reiniciar backend y ver estado
+sudo systemctl daemon-reload
+sudo systemctl restart portfolio-tracker.service
+sleep 2
+sudo systemctl --no-pager --full status portfolio-tracker.service | sed -n '1,80p'
+sudo journalctl -u portfolio-tracker.service -n 120 --no-pager
+
+# 3) Comprobar backend local
+curl -i http://127.0.0.1:8000/api/health
+```
+
+Si el curl local sigue fallando, prueba arranque manual para ver el traceback real:
+
+```bash
+cd ~/Finance/backend
+poetry run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Si el curl local funciona pero fuera sigue 502:
+
+```bash
+cd ~/Finance
+bash deploy/add_to_funnel.sh
+tailscale funnel status
+curl -i https://<host>.ts.net/finance/api/health
+```
+
+Opcional (ver puertos escuchando):
+
+```bash
+sudo ss -ltnp | grep -E ':8000|:8501|:9000'
+```
+
 ### El backend no arranca
 
 ```bash
