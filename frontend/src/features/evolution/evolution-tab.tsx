@@ -366,14 +366,6 @@ export function EvolutionTab() {
     );
   }
 
-  if (!fundKeys.length) {
-    return (
-      <div className="py-8 text-center text-sm text-text-secondary">
-        No hay datos de histórico de NAV disponibles.
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
       {/* ── Controls ───────────────────────────────────────────── */}
@@ -495,6 +487,11 @@ export function EvolutionTab() {
               </button>
             );
           })}
+          {orderedFundKeys.length === 0 && (
+            <span className="text-xs text-text-secondary">
+              Sin fondos cargados. Añade un fondo externo para empezar.
+            </span>
+          )}
         </div>
 
         {/* Add external fund */}
@@ -697,21 +694,30 @@ export function EvolutionTab() {
         )}
       </div>
 
+      {!fundKeys.length && (
+        <div className="glass-panel p-6 text-center text-sm text-text-secondary">
+          No hay datos de histórico en cartera todavía. Usa "+ Fondo externo" para comparar y analizar fondos nuevos.
+        </div>
+      )}
+
       {/* ── Growth chart ───────────────────────────────────────── */}
-      <GrowthChart
-        datasets={datasets}
-        activeFunds={activeFunds}
-        fundColorMap={fundColorMap}
-        start={start}
-        end={end}
-        zoomLeft={zoomLeft}
-        zoomRight={zoomRight}
-        onZoomChange={(l, r) => { setZoomLeft(l); setZoomRight(r); }}
-        onZoomReset={() => { setZoomLeft(null); setZoomRight(null); }}
-      />
+      {fundKeys.length > 0 && (
+        <GrowthChart
+          datasets={datasets}
+          activeFunds={activeFunds}
+          fundColorMap={fundColorMap}
+          start={start}
+          end={end}
+          zoomLeft={zoomLeft}
+          zoomRight={zoomRight}
+          onZoomChange={(l, r) => { setZoomLeft(l); setZoomRight(r); }}
+          onZoomReset={() => { setZoomLeft(null); setZoomRight(null); }}
+        />
+      )}
 
       {/* ── Period badge — shows the effective analysis window ─── */}
-      <div className="flex items-center gap-2 text-xs text-text-secondary px-1">
+      {fundKeys.length > 0 && (
+        <div className="flex items-center gap-2 text-xs text-text-secondary px-1">
         <span className="font-medium text-text-primary">
           Período de análisis:{" "}
           <span className="text-accent-glow">
@@ -725,21 +731,24 @@ export function EvolutionTab() {
             🔍 Zoom activo — métricas y correlaciones del período seleccionado
           </span>
         )}
-      </div>
+        </div>
+      )}
 
       {/* ── Metrics table ──────────────────────────────────────── */}
-      <MetricsTable
-        datasets={datasets}
-        activeFunds={activeFunds}
-        fundColorMap={fundColorMap}
-        start={commonStart}
-        end={effectiveEnd}
-        benchmarkKey={benchmarkKey}
-        fundIsinMap={fundIsinMap}
-      />
+      {fundKeys.length > 0 && (
+        <MetricsTable
+          datasets={datasets}
+          activeFunds={activeFunds}
+          fundColorMap={fundColorMap}
+          start={commonStart}
+          end={effectiveEnd}
+          benchmarkKey={benchmarkKey}
+          fundIsinMap={fundIsinMap}
+        />
+      )}
 
       {/* ── Correlation heatmap ────────────────────────────────── */}
-      {correlation && (
+      {fundKeys.length > 0 && correlation && (
         <CorrelationHeatmap
           labels={correlation.labels}
           matrix={correlation.matrix}
@@ -747,7 +756,7 @@ export function EvolutionTab() {
       )}
 
       {/* ── Annual returns ─────────────────────────────────────── */}
-      <AnnualReturnsHeatmap activeFunds={activeFunds} />
+      {fundKeys.length > 0 && <AnnualReturnsHeatmap activeFunds={activeFunds} />}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ExternalLink, ClipboardList, RefreshCw, Target, Globe } from "lucide-react";
 import { Spinner } from "@/components/ui";
+import { FundSearchInput } from "@/components/ui";
 import {
   useDetails,
   useBenchmark,
@@ -9,7 +10,7 @@ import {
   useRefreshFundDetail,
 } from "./hooks";
 import { ComparisonBars, FundDetailPanel, HoldingsGrid } from "./components";
-import type { FundDetailsMap } from "@/types";
+import type { FundDetailsMap, FundSearchResult } from "@/types";
 
 /* ── Aggregate helper ─────────────────────────────────────────────── */
 
@@ -39,15 +40,19 @@ function aggregate(
 export function DetailsTab() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [benchmarkKey, setBenchmarkKey] = useState<string | null>(null);
+  const [externalFund, setExternalFund] = useState<FundSearchResult | null>(null);
 
   const { data: details, isLoading } = useDetails();
   const { data: benchmark } = useBenchmark();
   const { data: portfolioHoldings } = usePortfolioHoldings();
 
   // Resolve selected fund ISIN for the detail query
-  const selectedIsin = selectedKey && details?.[selectedKey]?.isin;
+  const selectedIsin =
+    (selectedKey && details?.[selectedKey]?.isin) ||
+    externalFund?.isin ||
+    null;
   const { data: fundDetail, isLoading: detailLoading } = useFundDetail(
-    selectedIsin ?? null,
+    selectedIsin,
   );
   const refreshMutation = useRefreshFundDetail();
 
@@ -82,16 +87,6 @@ export function DetailsTab() {
         (f.region && Object.keys(f.region).length > 0),
     );
 
-  if (!hasData) {
-    return (
-      <div className="py-8 text-center">
-        <p className="mb-4 text-text-secondary">
-          No hay datos sectoriales/geográficos disponibles.
-        </p>
-      </div>
-    );
-  }
-
   /* ── Benchmark data resolution ──────────────────────────── */
   let benchSectors: Record<string, number> | null = null;
   let benchRegions: Record<string, number> | null = null;
@@ -116,6 +111,13 @@ export function DetailsTab() {
   }
 
   const selectedFund = selectedKey ? details?.[selectedKey] : null;
+  const selectedFundName = selectedKey ?? externalFund?.name ?? null;
+  const selectedFundFinectUrl =
+    selectedFund?.finect_url ||
+    externalFund?.url ||
+    (selectedIsin
+      ? `https://www.finect.com/fondos-inversion/${selectedIsin}`
+      : null);
 
   return (
     <div className="space-y-6">
@@ -140,12 +142,9 @@ export function DetailsTab() {
           ))}
         </select>
 
-        {selectedFund?.isin && (
+        {selectedFundFinectUrl && (
           <a
-            href={
-              selectedFund.finect_url ??
-              `https://www.finect.com/fondos-inversion/${selectedFund.isin}`
-            }
+            href={selectedFundFinectUrl}
             target="_blank"
             rel="noreferrer"
             className="rounded-lg border border-accent-glow/30 bg-accent-glow/15 px-3 py-1.5 text-xs text-accent-glow"
@@ -153,29 +152,46 @@ export function DetailsTab() {
             <ExternalLink className="inline size-3.5 align-text-bottom mr-1" /> Ver en Finect
           </a>
         )}
+
+        <div className="min-w-[280px] flex-1">
+          <FundSearchInput
+            onSelect={(fund) => {
+              setSelectedKey(null);
+              setExternalFund(fund);
+            }}
+            placeholder="Explorar fondo externo por nombre o ISIN..."
+          />
+        </div>
+
+        {externalFund && (
+          <button
+            onClick={() => setExternalFund(null)}
+            className="rounded-md border border-border-glass px-2.5 py-1.5 text-xs text-text-secondary hover:text-text-primary"
+          >
+            Limpiar fondo externo
+          </button>
+        )}
       </div>
 
       {/* ── Individual fund detail ──────────────────────────── */}
-      {selectedKey && selectedFund && (
+      {selectedIsin && (
         <div className="glass-panel space-y-4 p-6">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="font-semibold">
-              <ClipboardList className="inline size-4 align-text-bottom mr-1.5" />{selectedKey}
-              {selectedFund.isin && (
+              <ClipboardList className="inline size-4 align-text-bottom mr-1.5" />{selectedFundName}
+              {selectedIsin && (
                 <span className="ml-2.5 text-xs font-normal text-text-secondary">
-                  {selectedFund.isin}
+                  {selectedIsin}
                 </span>
               )}
             </h3>
-            {selectedIsin && (
-              <button
-                onClick={() => refreshMutation.mutate(selectedIsin)}
-                disabled={refreshMutation.isPending}
-                className="rounded-md border border-accent-glow/30 bg-accent-glow/15 px-3 py-1 text-xs text-accent-glow disabled:opacity-50"
-              >
-                <RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Recargar de Finect
-              </button>
-            )}
+            <button
+              onClick={() => refreshMutation.mutate(selectedIsin)}
+              disabled={refreshMutation.isPending}
+              className="rounded-md border border-accent-glow/30 bg-accent-glow/15 px-3 py-1 text-xs text-accent-glow disabled:opacity-50"
+            >
+              <RefreshCw className="inline size-3.5 align-text-bottom mr-1" /> Recargar de Finect
+            </button>
           </div>
 
           {detailLoading && (
@@ -189,7 +205,7 @@ export function DetailsTab() {
           )}
 
           {/* Fallback: cached sector/region */}
-          {!detailLoading && !fundDetail && (
+          {!detailLoading && !fundDetail && selectedFund && (
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
               {Object.keys(selectedFund.sector ?? {}).length > 0 && (
                 <div>
@@ -227,7 +243,18 @@ export function DetailsTab() {
       )}
 
       {/* ── Global aggregate view ───────────────────────────── */}
-      {!selectedKey && (
+      {!selectedIsin && !hasData && (
+        <div className="py-8 text-center">
+          <p className="mb-2 text-text-secondary">
+            No hay inversiones cargadas todavía.
+          </p>
+          <p className="text-sm text-text-muted">
+            Puedes explorar fondos nuevos con el buscador superior.
+          </p>
+        </div>
+      )}
+
+      {!selectedIsin && hasData && (
         <>
           {/* Benchmark legend bar */}
           <div className="flex flex-wrap items-center gap-4 rounded-lg border border-yellow-400/15 bg-yellow-400/6 px-3.5 py-2 text-xs">

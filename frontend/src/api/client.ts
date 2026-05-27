@@ -1,4 +1,5 @@
-const BASE_URL = "/api/portfolio";
+const APP_BASE_URL = import.meta.env.BASE_URL || "/";
+const BASE_URL = `${APP_BASE_URL.replace(/\/$/, "")}/api/portfolio`;
 
 /** Custom error class for API errors */
 export class ApiError extends Error {
