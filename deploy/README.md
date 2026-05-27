@@ -405,6 +405,24 @@ cd ~/Finance/backend
 poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+Si ves este error:
+
+```text
+ValueError: Can't patch loop of type ...
+```
+
+Significa que `nest_asyncio` intentó parchear `uvloop` (no compatible en runtime de producción).
+
+Pasos:
+
+```bash
+cd ~/Finance
+git pull
+sudo systemctl restart portfolio-tracker.service
+sudo journalctl -u portfolio-tracker.service -n 120 --no-pager
+curl -i http://127.0.0.1:8000/api/health
+```
+
 ### El webhook no recibe eventos de GitHub
 
 1. **Verificar que el webhook está activo:**

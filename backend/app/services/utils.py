@@ -7,14 +7,42 @@ Funciones auxiliares reutilizadas por múltiples módulos:
 """
 
 import asyncio
+import logging
 import math
+import sys
 from typing import Any
 
 import nest_asyncio
 import pandas as pd
 
-# Parchear event loop para compatibilidad con Jupyter y FastAPI
-nest_asyncio.apply()
+logger = logging.getLogger(__name__)
+
+
+def _patch_loop_for_notebooks() -> None:
+    """Apply nest_asyncio only for notebook-style event loops.
+
+    In production (uvicorn + uvloop), forcing nest_asyncio can raise:
+    "ValueError: Can't patch loop of type ...".
+    """
+    if "ipykernel" not in sys.modules:
+        return
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return
+
+    if "uvloop" in type(loop).__module__:
+        logger.info("Skipping nest_asyncio patch on uvloop event loop")
+        return
+
+    try:
+        nest_asyncio.apply(loop)
+    except ValueError as exc:
+        logger.warning("nest_asyncio patch skipped: %s", exc)
+
+
+_patch_loop_for_notebooks()
 
 
 def run_sync(coro) -> Any:
