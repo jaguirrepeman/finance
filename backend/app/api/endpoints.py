@@ -15,7 +15,7 @@ import os
 import shutil
 from typing import List
 
-from ..schemas.portfolio import (
+from app.schemas.portfolio import (
     AnalysisResponse,
     FundBase,
     PositionsResponse,
@@ -39,7 +39,7 @@ from ..schemas.portfolio import (
     LossHarvestingCandidate,
     LossHarvestingSuggestion,
 )
-from ..services.portfolio_service import (
+from app.services.portfolio_service import (
     CACHE_DIR,
     EXCEL_PATH,
     TSV_PATH,

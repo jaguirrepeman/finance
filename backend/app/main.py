@@ -20,9 +20,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import endpoints
-from .services.http_client import close_http_client
-from .services.portfolio_service import load_json, run_analytics_pipeline
+from app.api import endpoints
+from app.services.http_client import close_http_client
+from app.services.portfolio_service import load_json, run_analytics_pipeline
 
 # ---------------------------------------------------------------------------
 # Logging
