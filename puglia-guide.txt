@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Guía Puglia 2026 — Opciones de itinerario</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --sand:#fdf6ec;--terracotta:#c0623b;--terracotta-light:#f2ddd2;
+  --adriatic:#1a6b8a;--adriatic-light:#d4eaf4;
+  --olive:#5a7a3a;--olive-light:#deebd0;
+  --warm-gray:#f5f0eb;--text:#2c2c2c;--muted:#6b6b6b;
+  --border:#e5ddd4;
+}
+body{font-family:'Inter',sans-serif;background:var(--sand);color:var(--text);font-size:15px;line-height:1.65}
+a{color:var(--adriatic);text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:1000px;margin:0 auto;padding:0 1.25rem}
+
+/* Header */
+header{background:linear-gradient(135deg,var(--terracotta) 0%,#a04d2e 100%);color:#fff;padding:2.5rem 0 2rem}
+header h1{font-size:1.9rem;font-weight:700;letter-spacing:-.02em}
+header p{margin-top:.4rem;opacity:.85;font-size:.95rem}
+.badge{display:inline-block;background:rgba(255,255,255,.2);border-radius:999px;font-size:.8rem;padding:.2rem .75rem;margin-top:.75rem;margin-right:.5rem}
+
+/* Nav */
+nav{background:#fff;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+nav .container{display:flex;gap:.25rem;padding-top:.5rem;padding-bottom:.5rem;overflow-x:auto;white-space:nowrap}
+nav a{padding:.35rem .8rem;border-radius:6px;font-size:.82rem;font-weight:500;color:var(--muted);transition:background .15s,color .15s}
+nav a:hover{background:var(--warm-gray);color:var(--text);text-decoration:none}
+
+/* Cards */
+.option-card{background:#fff;border-radius:12px;border:1px solid var(--border);margin:2rem 0;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+.card-header{padding:1.25rem 1.5rem;display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap}
+.card-header h2{font-size:1.15rem;font-weight:700}
+.card-body{padding:0 1.5rem 1.5rem}
+.tag{display:inline-block;border-radius:999px;font-size:.72rem;font-weight:600;padding:.2rem .65rem;letter-spacing:.02em}
+.tag-hotels{background:var(--adriatic-light);color:var(--adriatic)}
+.tag-nights{background:var(--olive-light);color:var(--olive)}
+.tag-dest{background:var(--terracotta-light);color:var(--terracotta)}
+
+/* Option accent colors */
+.opt-a .card-header{border-left:5px solid #6b8cba}
+.opt-b .card-header{border-left:5px solid var(--terracotta)}
+.opt-c .card-header{border-left:5px solid var(--olive)}
+.opt-d .card-header{border-left:5px solid #8854c0}
+.opt-a .tag-id{background:#dde8f5;color:#3a5f8a}
+.opt-b .tag-id{background:var(--terracotta-light);color:var(--terracotta)}
+.opt-c .tag-id{background:var(--olive-light);color:var(--olive)}
+.opt-d .tag-id{background:#ede0f7;color:#6b3ba0}
+
+/* Tables */
+.day-table{width:100%;border-collapse:collapse;font-size:.82rem;margin:1rem 0}
+.day-table th{background:var(--warm-gray);text-align:left;padding:.55rem .7rem;font-weight:600;border-bottom:2px solid var(--border);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.day-table td{padding:.55rem .7rem;border-bottom:1px solid var(--border);vertical-align:top}
+.day-table tr:last-child td{border-bottom:none}
+.day-table tr:hover td{background:var(--warm-gray)}
+.day-num{font-weight:700}
+.city-pill{display:inline-block;background:var(--terracotta-light);color:var(--terracotta);border-radius:4px;font-size:.72rem;font-weight:600;padding:.1rem .4rem;margin:.1rem .15rem .1rem 0}
+.city-pill.new{background:#ede0f7;color:#6b3ba0}
+.transport-ok{color:#4a8c3f;font-size:.78rem}
+.transport-warn{color:#b97a10;font-size:.78rem}
+.warn-box{background:#fffbeb;border-left:3px solid #f59e0b;border-radius:4px;padding:.6rem .85rem;font-size:.82rem;margin:.75rem 0;color:#78520a}
+.warn-box strong{color:#92640c}
+.note-box{background:var(--adriatic-light);border-left:3px solid var(--adriatic);border-radius:4px;padding:.6rem .85rem;font-size:.82rem;margin:.75rem 0;color:#135066}
+.pros-cons{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:.85rem 0}
+@media(max-width:600px){.pros-cons{grid-template-columns:1fr}}
+.pros{background:#f0f9eb;border-radius:8px;padding:.85rem 1rem}
+.cons{background:#fef2f2;border-radius:8px;padding:.85rem 1rem}
+.pros h4{color:#3d7a2a;font-size:.82rem;font-weight:700;margin-bottom:.45rem}
+.cons h4{color:#c0392b;font-size:.82rem;font-weight:700;margin-bottom:.45rem}
+.pros li,.cons li{font-size:.82rem;margin:.2rem 0 .2rem 1.2rem}
+
+/* Comparison table */
+.compare-table{width:100%;border-collapse:collapse;font-size:.82rem}
+.compare-table th{padding:.6rem .8rem;text-align:center;font-weight:600;border-bottom:2px solid var(--border)}
+.compare-table th:first-child{text-align:left}
+.compare-table td{padding:.55rem .8rem;border-bottom:1px solid var(--border);text-align:center}
+.compare-table td:first-child{text-align:left;font-weight:500;color:var(--muted);font-size:.78rem}
+.compare-table tr:hover td{background:var(--warm-gray)}
+.compare-table .best{background:#f0f9eb;font-weight:700;color:#3d7a2a}
+.compare-table .col-a{background:#f5f8fd}
+.compare-table .col-b{background:#fdf5f2}
+.compare-table .col-c{background:#f4faf0}
+.compare-table .col-d{background:#f7f2fd}
+.check{color:#4a8c3f}
+.cross{color:#c0392b}
+
+/* Transport cards */
+.transport-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+@media(max-width:600px){.transport-grid{grid-template-columns:1fr}}
+.t-card{background:#fff;border-radius:8px;border:1px solid var(--border);padding:1rem}
+.t-card h4{font-size:.82rem;font-weight:700;margin-bottom:.5rem;color:var(--adriatic)}
+.t-card li{font-size:.78rem;margin:.2rem 0 .2rem 1.2rem;color:#444}
+.t-warn h4{color:var(--terracotta)}
+
+.section-title{font-size:1.3rem;font-weight:700;margin:2.5rem 0 .75rem;padding-bottom:.4rem;border-bottom:2px solid var(--border)}
+
+@media print{
+  nav{display:none!important}
+  .option-card{break-inside:avoid;box-shadow:none}
+  body{background:#fff;font-size:11pt}
+  header{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <h1>&#x1F1EE;&#x1F1F9; Gu&iacute;a Puglia 2026</h1>
+    <p>Hijo (33) + Madre (73) &middot; Transporte p&uacute;blico &middot; 100% cultural</p>
+    <div>
+      <span class="badge">30 Jul &rarr; 7/8 Ago 2026</span>
+      <span class="badge">Llegada: Brindisi &middot; Salida: Bari</span>
+      <span class="badge">Presupuesto medio-alto</span>
+    </div>
+  </div>
+</header>
+
+<nav>
+  <div class="container">
+    <a href="#opciones">Opciones</a>
+    <a href="#comparativa">Comparativa</a>
+    <a href="#transporte">Transporte</a>
+    <a href="#notas">Notas ciudades</a>
+    <a href="#pendiente">Pendiente</a>
+  </div>
+</nav>
+
+<main class="container" style="padding-top:1.5rem;padding-bottom:3rem">
+
+  <!-- ══ OPCIONES ══════════════════════════════════════════ -->
+  <h2 class="section-title" id="opciones">Opciones de itinerario</h2>
+  <p style="color:var(--muted);font-size:.88rem;margin-bottom:1.5rem">Conexiones verificadas con Wikipedia (FSE/Trenitalia) y Rome2Rio &mdash; mayo 2026.</p>
+
+  <!-- OPCI&Oacute;N A -->
+  <div class="option-card opt-a" id="opcion-a">
+    <div class="card-header">
+      <span class="tag tag-id opt-a">Opci&oacute;n A</span>
+      <h2>8 noches &middot; 2 hoteles &middot; M&iacute;nima log&iacute;stica</h2>
+      <div style="margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap">
+        <span class="tag tag-nights">8 noches</span>
+        <span class="tag tag-hotels">2 hoteles</span>
+        <span class="tag tag-dest">11 destinos</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.82rem;color:var(--muted);margin-bottom:.85rem"><strong>Bases:</strong> 3 noches Brindisi + 5 noches Bari</p>
+      <table class="day-table">
+        <thead><tr><th>D&iacute;a</th><th>Fecha</th><th>Base</th><th>Visitas</th><th>Transporte</th></tr></thead>
+        <tbody>
+          <tr><td><span class="day-num">1</span></td><td>Jue 30 Jul</td><td>Brindisi</td><td>Llegada 22h, check-in, cena tard&iacute;a</td><td><span class="transport-ok">Aeropuerto &rarr; hotel &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">2</span></td><td>Vie 31 Jul</td><td>Brindisi</td><td><span class="city-pill">Lecce</span> full day (6h): Santa Croce, Duomo, anfiteatro, Piazza S.Oronzo, teatro romano, Museo Faggiano</td><td><span class="transport-ok">Trenitalia Brindisi&harr;Lecce 25min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">3</span></td><td>S&aacute;b 1 Ago</td><td>Brindisi</td><td><span class="city-pill">Taranto</span> full day: MArTA (2.5h) + Citt&agrave; Vecchia + Castello (2h)</td><td><span class="transport-ok">Trenitalia Brindisi&harr;Taranto 1h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">4</span></td><td>Dom 2 Ago</td><td><strong>&rarr; Bari</strong></td><td><span class="city-pill">Brindisi</span> AM (2h) &rarr; <span class="city-pill">Ostuni</span> (2.5h) &rarr; <span class="city-pill">Polignano</span> (1.5h) &rarr; Bari</td><td><span class="transport-ok">Trenitalia lineal sur&rarr;norte &#x2705; DOM</span></td></tr>
+          <tr><td><span class="day-num">5</span></td><td>Lun 3 Ago</td><td>Bari</td><td><span class="city-pill">Alberobello</span> (2.5h) + <span class="city-pill">Locorotondo</span> (1.5h)</td><td><span class="transport-ok">FSE ida+vuelta ~3h &#x2705; laborable</span></td></tr>
+          <tr><td><span class="day-num">6</span></td><td>Mar 4 Ago</td><td>Bari</td><td><span class="city-pill">Bari Vecchia</span> full day (6h): San Nicola, Cattedrale, Castello, murallas, Strada Orecchiette</td><td><span class="transport-ok">A pie &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">7</span></td><td>Mi&eacute; 5 Ago</td><td>Bari</td><td><span class="city-pill">Matera</span> full day (6h): Sasso Caveoso+Barisano, iglesias rupestres, Palombaro Lungo</td><td><span class="transport-ok">Bus ~1.2h&times;2 &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">8</span></td><td>Jue 6 Ago</td><td>Bari</td><td><span class="city-pill">Trani</span> (2.5h) + <span class="city-pill">Castel del Monte</span> (2h)</td><td><span class="transport-ok">Ferrotramviaria + navetta + bus ~3h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">9</span></td><td>Vie 7 Ago</td><td>&mdash;</td><td>Aeropuerto Bari 11:00</td><td><span class="transport-ok">Bus/taxi ~20min &#x2705;</span></td></tr>
+        </tbody>
+      </table>
+      <div class="note-box"><strong>D&iacute;a 4:</strong> Brindisi &rarr; Ostuni (35 min) &rarr; Ostuni &rarr; Polignano (25 min) &rarr; Polignano &rarr; Bari (30 min). Ruta lineal sur&rarr;norte. Funciona domingos.</div>
+      <div class="pros-cons">
+        <div class="pros"><h4>&#x2705; Pros</h4><ul><li>Solo 2 hoteles &mdash; cero log&iacute;stica de maletas</li><li>Riesgo de transporte m&iacute;nimo</li><li>L&iacute;nea base de referencia</li></ul></div>
+        <div class="cons"><h4>&#x26A0;&#xFE0F; Contras</h4><ul><li>Taranto ida+vuelta desde Brindisi (2h perdidas)</li><li>Alberobello ida+vuelta desde Bari</li><li>D&iacute;a 4 apretado (3 ciudades)</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPCI&Oacute;N B -->
+  <div class="option-card opt-b" id="opcion-b">
+    <div class="card-header">
+      <span class="tag tag-id opt-b">Opci&oacute;n B</span>
+      <h2>8 noches &middot; 3 hoteles &middot; Mismas ciudades, mejor ruta</h2>
+      <div style="margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap">
+        <span class="tag tag-nights">8 noches</span>
+        <span class="tag tag-hotels">3 hoteles</span>
+        <span class="tag tag-dest">12 destinos (+Martina Franca)</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.82rem;color:var(--muted);margin-bottom:.85rem"><strong>Bases:</strong> 1 noche Brindisi + 1 noche Taranto + 6 noches Bari &middot; Las <strong>mismas 11 ciudades</strong> que A, ruta sur&rarr;norte sin backtracking</p>
+      <table class="day-table">
+        <thead><tr><th>D&iacute;a</th><th>Fecha</th><th>Base</th><th>Visitas</th><th>Transporte</th></tr></thead>
+        <tbody>
+          <tr><td><span class="day-num">1</span></td><td>Jue 30 Jul</td><td>Brindisi</td><td>Llegada 22h, check-in</td><td>&mdash;</td></tr>
+          <tr><td><span class="day-num">2</span></td><td>Vie 31 Jul</td><td><strong>&rarr; Taranto</strong></td><td><span class="city-pill">Brindisi</span> AM (2.5h: Columna, San Giovanni, catedral) &rarr; 11:30 &rarr; <span class="city-pill">Lecce</span> (5h: Santa Croce, Duomo, anfiteatro, Museo Faggiano) &rarr; transfer nocturno a Taranto</td><td><span class="transport-ok">Trenitalia: 25min+25min+1h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">3</span></td><td>S&aacute;b 1 Ago</td><td><strong>&rarr; Bari</strong></td><td><span class="city-pill">MArTA</span> + <span class="city-pill">Taranto</span> AM (3.5h) &rarr; FSE &rarr; <span class="city-pill">Martina Franca</span> (1h) &rarr; <span class="city-pill">Locorotondo</span> (1h) &rarr; <span class="city-pill">Alberobello</span> (2h) &rarr; Bari</td><td><span class="transport-ok">FSE lineal ~2.5h &#x2705; s&aacute;b=laborable</span></td></tr>
+          <tr><td><span class="day-num">4</span></td><td>Dom 2 Ago</td><td>Bari</td><td><span class="city-pill">Ostuni</span> (3h) + <span class="city-pill">Polignano</span> (2h)</td><td><span class="transport-ok">Trenitalia costa sur&rarr;norte &#x2705; DOM</span></td></tr>
+          <tr><td><span class="day-num">5</span></td><td>Lun 3 Ago</td><td>Bari</td><td><span class="city-pill">Bari Vecchia</span> full day (6h)</td><td><span class="transport-ok">A pie &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">6</span></td><td>Mar 4 Ago</td><td>Bari</td><td><span class="city-pill">Matera</span> full day (6h)</td><td><span class="transport-ok">Bus ~1.2h&times;2 &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">7</span></td><td>Mi&eacute; 5 Ago</td><td>Bari</td><td><span class="city-pill">Trani</span> (2.5h) + <span class="city-pill">Castel del Monte</span> (2h)</td><td><span class="transport-ok">Ferrotramviaria + navetta + bus ~3h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">8</span></td><td>Jue 6 Ago</td><td>Bari</td><td>D&iacute;a libre: profundizar Bari (Pinacoteca) o Monopoli / Conversano</td><td><span class="transport-ok">Variable &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">9</span></td><td>Vie 7 Ago</td><td>&mdash;</td><td>Aeropuerto 11:00</td><td>&mdash;</td></tr>
+        </tbody>
+      </table>
+      <div class="warn-box"><strong>&#x26A0;&#xFE0F; D&iacute;a 3 (s&aacute;bado FSE):</strong> Taranto&rarr;Martina Franca solo ~3 trenes/d&iacute;a. Si se pierde uno, espera 1-2h. Plan B: bus FSE L&iacute;nea 310.</div>
+      <div class="pros-cons">
+        <div class="pros"><h4>&#x2705; Pros</h4><ul><li>Brindisi se ve cuando duermes all&iacute; (d&iacute;a 2 AM)</li><li>Ruta lineal sur&rarr;norte sin backtracking</li><li>MArTA con buen tiempo AM</li><li>Martina Franca gratis (parada FSE en ruta)</li><li>D&iacute;a libre de colch&oacute;n</li></ul></div>
+        <div class="cons"><h4>&#x26A0;&#xFE0F; Contras</h4><ul><li>3 hoteles (1 cambio m&aacute;s que A)</li><li>D&iacute;a 2 largo (Brindisi AM + Lecce + transfer nocturno a Taranto)</li><li>D&iacute;a 3 s&aacute;bado: FSE baja frecuencia Taranto&rarr;M.Franca</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPCI&Oacute;N C -->
+  <div class="option-card opt-c" id="opcion-c">
+    <div class="card-header">
+      <span class="tag tag-id opt-c">Opci&oacute;n C</span>
+      <h2>9 noches &middot; 3 hoteles &middot; M&aacute;s contenido &#x2705; RECOMENDADA</h2>
+      <div style="margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap">
+        <span class="tag tag-nights">9 noches</span>
+        <span class="tag tag-hotels">3 hoteles</span>
+        <span class="tag tag-dest">14 destinos</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.82rem;color:var(--muted);margin-bottom:.85rem"><strong>Bases:</strong> 1 noche Brindisi + 1 noche Taranto + 7 noches Bari &middot; Misma intensidad que A/B + <em>destinos extra</em>. El d&iacute;a adicional = m&aacute;s contenido, no m&aacute;s relax.</p>
+      <table class="day-table">
+        <thead><tr><th>D&iacute;a</th><th>Fecha</th><th>Base</th><th>Visitas</th><th>Transporte</th></tr></thead>
+        <tbody>
+          <tr><td><span class="day-num">1</span></td><td>Jue 30 Jul</td><td>Brindisi</td><td>Llegada 22h, passeggiata nocturna + cena</td><td>&mdash;</td></tr>
+          <tr><td><span class="day-num">2</span></td><td>Vie 31 Jul</td><td><strong>&rarr; Taranto</strong></td><td><span class="city-pill">Brindisi</span> AM (2.5h: Columna, San Giovanni, catedral) &rarr; 11:30 &rarr; <span class="city-pill">Lecce</span> (5h: Santa Croce, Duomo, anfiteatro, teatro romano, Museo Faggiano) &rarr; transfer nocturno a Taranto</td><td><span class="transport-ok">Trenitalia: 25min+25min+1h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">3</span></td><td>S&aacute;b 1 Ago</td><td><strong>&rarr; Bari</strong></td><td><span class="city-pill">MArTA</span> AM (2.5h) + <span class="city-pill">Taranto</span> Citt&agrave; Vecchia (1.5h) &rarr; FSE &rarr; <span class="city-pill">Martina Franca</span> (1.5h: Palazzo Ducale) &rarr; <span class="city-pill">Locorotondo</span> (1h) &rarr; <span class="city-pill">Alberobello</span> (2h) &rarr; Bari</td><td><span class="transport-ok">FSE lineal ~2.5h &#x2705; s&aacute;b=laborable</span></td></tr>
+          <tr><td><span class="day-num">4</span></td><td>Dom 2 Ago</td><td>Bari</td><td><span class="city-pill">Ostuni</span> (3h: ciudad blanca, catedral) + <span class="city-pill">Polignano</span> (2h: acantilado, Lama Monachile)</td><td><span class="transport-ok">Trenitalia costa ~2h R/T &#x2705; DOM</span></td></tr>
+          <tr><td><span class="day-num">5</span></td><td>Lun 3 Ago</td><td>Bari</td><td><span class="city-pill">Bari Vecchia</span> full day (6h): San Nicola, Cattedrale, Castello Svevo, Fortino, murallas, Strada Orecchiette, Pinacoteca</td><td><span class="transport-ok">A pie &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">6</span></td><td>Mar 4 Ago</td><td>Bari</td><td><span class="city-pill">Matera</span> full day (6-7h): Sasso Caveoso, Sasso Barisano, iglesias rupestres, Palombaro Lungo, Cattedrale, MUSMA, Casa Noha</td><td><span class="transport-ok">Bus ~1.2h&times;2 &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">7</span></td><td>Mi&eacute; 5 Ago</td><td>Bari</td><td><span class="city-pill">Trani</span> (2.5h: catedral sobre el mar, ghetto ebraico) + <span class="city-pill">Castel del Monte</span> (2h)</td><td><span class="transport-ok">Ferrotramviaria + navetta + bus ~3h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">8</span></td><td>Jue 6 Ago</td><td>Bari</td><td><span class="city-pill new">&#x1F195; Gravina in Puglia</span> (3.5h: ca&ntilde;&oacute;n, Ponte Viadotto, San Michele delle Grotte, catedral) + <span class="city-pill new">&#x1F195; Altamura</span> (2.5h: catedral Federico II, pan DOP)</td><td><span class="transport-ok">FAL: Bari&rarr;Altamura 50min&rarr;Gravina 15min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">9</span></td><td>Vie 7 Ago</td><td>Bari</td><td>Buffer / si todo bien &rarr; <span class="city-pill new">Monopoli</span> (2.5h: borgo marinero, puerto) + repetir Bari AM</td><td><span class="transport-ok">Trenitalia 30min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">10</span></td><td>S&aacute;b 8 Ago</td><td>&mdash;</td><td>Aeropuerto Bari, vuelo</td><td><span class="transport-ok">Bus/taxi ~20min &#x2705;</span></td></tr>
+        </tbody>
+      </table>
+      <div class="warn-box"><strong>&#x26A0;&#xFE0F; D&iacute;a 3 (el m&aacute;s denso) &mdash; horario sugerido:</strong><br>
+      08:30 MArTA abre &middot; 11:00 Citt&agrave; Vecchia + Castello &middot; 12:30 almuerzo Taranto &middot; 13:30 FSE &rarr; Martina Franca &middot; 14:30 Palazzo Ducale (1.5h) &middot; 16:00 FSE &rarr; Locorotondo (5 min) &middot; 17:15 FSE &rarr; Alberobello (8 min) &middot; 17:25 Alberobello en luz dorada &#x2728; &middot; 19:30 FSE &rarr; Bari (~21h)</div>
+      <div class="pros-cons">
+        <div class="pros"><h4>&#x2705; Pros</h4><ul><li>14 destinos vs. 11 de A (+27% contenido)</li><li>Gravina: ca&ntilde;&oacute;n &uacute;nico, cero turistas, paisaje radicalmente distinto</li><li>Altamura: pan DOP m&aacute;s famoso de Italia + catedral Federico II</li><li>Martina Franca gratis (parada FSE)</li><li>D&iacute;a 9 = buffer real: Monopoli si todo bien, retaguardia si algo fall&oacute;</li></ul></div>
+        <div class="cons"><h4>&#x26A0;&#xFE0F; Contras</h4><ul><li>1 noche extra hotel (~130-150&euro;)</li><li>D&iacute;a 2 largo (Brindisi + Lecce + transfer nocturno)</li><li>D&iacute;a 3 ambicioso (MArTA + Taranto + 3 pueblos FSE)</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPCI&Oacute;N D -->
+  <div class="option-card opt-d" id="opcion-d">
+    <div class="card-header">
+      <span class="tag tag-id opt-d">Opci&oacute;n D</span>
+      <h2>9 noches &middot; 4 hoteles &middot; M&aacute;ximo cultural (incluye Otranto)</h2>
+      <div style="margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap">
+        <span class="tag tag-nights">9 noches</span>
+        <span class="tag tag-hotels">4 hoteles</span>
+        <span class="tag tag-dest">16 destinos</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <p style="font-size:.82rem;color:var(--muted);margin-bottom:.85rem"><strong>Bases:</strong> 1 noche Brindisi + 1 noche Lecce + 1 noche Taranto + 6 noches Bari &middot; Todo lo de C + <strong>Otranto</strong> (mosaico medieval 1166, uno de los m&aacute;s grandes del mundo) + noche en Lecce iluminada. M&aacute;xima densidad cultural posible.</p>
+      <table class="day-table">
+        <thead><tr><th>D&iacute;a</th><th>Fecha</th><th>Base</th><th>Visitas</th><th>Transporte</th></tr></thead>
+        <tbody>
+          <tr><td><span class="day-num">1</span></td><td>Jue 30 Jul</td><td>Brindisi</td><td>Llegada 22h. Passeggiata nocturna + cena tard&iacute;a</td><td>&mdash;</td></tr>
+          <tr><td><span class="day-num">2</span></td><td>Vie 31 Jul</td><td><strong>&rarr; Lecce</strong></td><td><span class="city-pill">Brindisi</span> AM (2.5h: Columna Romana, San Giovanni, catedral, lungomare) &rarr; 11:30 &rarr; <span class="city-pill">Lecce</span> tarde (5h: Santa Croce, Duomo, anfiteatro, Piazza S.Oronzo, teatro romano, Museo Faggiano). Check-in Lecce.</td><td><span class="transport-ok">Trenitalia 25min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">3</span></td><td>S&aacute;b 1 Ago</td><td><strong>&rarr; Taranto</strong></td><td><span class="city-pill new">&#x1F195; Otranto</span> AM (bus 8:00, 3h: catedral+mosaico 1166+M&aacute;rtires+cripta 42 columnas+Castello+San Pietro) &rarr; 13:00 bus vuelta Lecce &rarr; almuerzo &rarr; 15:00 tren &rarr; <span class="city-pill">Taranto</span> PM (2.5h: Citt&agrave; Vecchia, Castello, catedral, ponte girevole)</td><td><span class="transport-ok">Bus STP ~50min&times;2 + Trenitalia 25+60min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">4</span></td><td>Dom 2 Ago</td><td><strong>&rarr; Bari</strong></td><td><span class="city-pill">MArTA</span> AM (2.5h) + Taranto extra (1h) &rarr; bus FSE &rarr; <span class="city-pill">Martina Franca</span> (1.5h) &rarr; <span class="city-pill">Locorotondo</span> (1h) &rarr; <span class="city-pill">Alberobello</span> (2h) &rarr; Bari</td><td><span class="transport-warn">Bus FSE sust. Taranto&rarr;M.Franca &#x26A0;&#xFE0F; DOM + FSE&rarr;Bari &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">5</span></td><td>Lun 3 Ago</td><td>Bari</td><td><span class="city-pill">Ostuni</span> (3h) + <span class="city-pill">Polignano</span> (2h)</td><td><span class="transport-ok">Trenitalia costa ~2h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">6</span></td><td>Mar 4 Ago</td><td>Bari</td><td><span class="city-pill">Bari Vecchia</span> full day (6h): San Nicola, Cattedrale, Castello, murallas, Strada Orecchiette, Pinacoteca</td><td><span class="transport-ok">A pie &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">7</span></td><td>Mi&eacute; 5 Ago</td><td>Bari</td><td><span class="city-pill">Matera</span> full day (6-7h): Sasso Caveoso+Barisano, iglesias rupestres, Palombaro Lungo, Cattedrale, MUSMA, Casa Noha</td><td><span class="transport-ok">Bus ~1.2h&times;2 &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">8</span></td><td>Jue 6 Ago</td><td>Bari</td><td><span class="city-pill">Trani</span> (2.5h: catedral rom&aacute;nica sobre el mar, ghetto ebraico) + <span class="city-pill">Castel del Monte</span> (2h: castillo octagonal UNESCO)</td><td><span class="transport-ok">Ferrotramviaria + navetta + bus ~3h &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">9</span></td><td>Vie 7 Ago</td><td>Bari</td><td><span class="city-pill new">&#x1F195; Gravina in Puglia</span> (3.5h: ca&ntilde;&oacute;n, Ponte Viadotto, San Michele delle Grotte) + <span class="city-pill new">&#x1F195; Altamura</span> (2.5h: catedral Federico II, pan DOP)</td><td><span class="transport-ok">FAL: Bari&rarr;Altamura 50min&rarr;Gravina 15min &#x2705;</span></td></tr>
+          <tr><td><span class="day-num">10</span></td><td>S&aacute;b 8 Ago</td><td>&mdash;</td><td><span class="city-pill new">Monopoli</span> AM r&aacute;pido si vuelo &ge;13:00 &rarr; aeropuerto Bari</td><td><span class="transport-ok">Trenitalia 30min &#x2705;</span></td></tr>
+        </tbody>
+      </table>
+      <div class="warn-box"><strong>&#x26A0;&#xFE0F; D&iacute;a 3 &mdash; log&iacute;stica detallada:</strong><br>7:30 desayuno Lecce &middot; 8:00 bus STP &rarr; Otranto (50 min) &middot; 9:00 catedral (mosaico 1166 + cripta + M&aacute;rtires = 1.5h) &middot; 10:30 Castello + San Pietro (1h) &middot; 12:00 bus vuelta &rarr; Lecce (50 min) &middot; 13:00 almuerzo Lecce (rustico leccese + pasticciotto) &middot; 15:00 tren Lecce&rarr;Brindisi (25min)&rarr;Taranto (60min) &middot; 16:30 check-in Taranto &middot; tarde: Citt&agrave; Vecchia al atardecer &middot; 19:30 cena vista mare</div>
+      <div class="warn-box"><strong>&#x26A0;&#xFE0F; D&iacute;a 4 domingo FSE:</strong> Taranto&rarr;Martina Franca NO hay tren. Solo bus sustitutivo FSE (~1h). Verificar horario agosto.</div>
+      <div class="pros-cons">
+        <div class="pros"><h4>&#x2705; Pros</h4><ul><li>16 destinos = m&aacute;ximo posible en 9 noches en transporte p&uacute;blico</li><li>Otranto: mosaico 1166 rivaliza con Ravenna, MUCHO menos turistas</li><li>Noche en Lecce = barroco leccese iluminado de noche (ESPECTACULAR)</li><li>4 zonas paisaj&iacute;sticas: Costa &middot; Valle d'Itria &middot; Salento &middot; Murgia</li><li>Taranto de noche (atmosf&eacute;rica) + MArTA AM fresco</li></ul></div>
+        <div class="cons"><h4>&#x26A0;&#xFE0F; Contras</h4><ul><li>4 hoteles (3 cambios de base) &mdash; m&aacute;s log&iacute;stica con maletas</li><li>D&iacute;a 3 es el m&aacute;s denso: 5h de transporte</li><li>D&iacute;a 4 domingo: bus sustitutivo FSE (riesgo)</li><li>~350&euro; extra vs. Opci&oacute;n A</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ COMPARATIVA ═══════════════════════════════════════ -->
+  <h2 class="section-title" id="comparativa">Comparativa de opciones</h2>
+  <div style="overflow-x:auto">
+  <table class="compare-table">
+    <thead><tr>
+      <th></th>
+      <th class="col-a">A</th>
+      <th class="col-b">B</th>
+      <th class="col-c">C &#x2705;</th>
+      <th class="col-d">D</th>
+    </tr></thead>
+    <tbody>
+      <tr><td>Hoteles</td><td class="col-a">2</td><td class="col-b">3</td><td class="col-c">3</td><td class="col-d">4</td></tr>
+      <tr><td>Noches</td><td class="col-a">8</td><td class="col-b">8</td><td class="col-c best">9</td><td class="col-d best">9</td></tr>
+      <tr><td>Destinos</td><td class="col-a">11</td><td class="col-b">12</td><td class="col-c best">14</td><td class="col-d best">16</td></tr>
+      <tr><td>Tr&aacute;nsito total</td><td class="col-a">~13.5h</td><td class="col-b">~11.5h</td><td class="col-c">~13h</td><td class="col-d">~14h</td></tr>
+      <tr><td>Riesgo transporte</td><td class="col-a best">Bajo</td><td class="col-b">Medio</td><td class="col-c">Medio</td><td class="col-d">Alto</td></tr>
+      <tr><td>Backtracking evitable</td><td class="col-a">Taranto+Albero R/T</td><td class="col-b best">M&iacute;nimo</td><td class="col-c best">M&iacute;nimo</td><td class="col-d best">M&iacute;nimo</td></tr>
+      <tr><td>Otranto (mosaico 1166)</td><td class="col-a"><span class="cross">&#x2717;</span></td><td class="col-b"><span class="cross">&#x2717;</span></td><td class="col-c"><span class="cross">&#x2717;</span></td><td class="col-d"><span class="check">&#x2713;</span></td></tr>
+      <tr><td>Noche Lecce iluminada</td><td class="col-a"><span class="cross">&#x2717;</span></td><td class="col-b"><span class="cross">&#x2717;</span></td><td class="col-c"><span class="cross">&#x2717;</span></td><td class="col-d"><span class="check">&#x2713;</span></td></tr>
+      <tr><td>Gravina + Altamura</td><td class="col-a"><span class="cross">&#x2717;</span></td><td class="col-b"><span class="cross">&#x2717;</span></td><td class="col-c"><span class="check">&#x2713;</span></td><td class="col-d"><span class="check">&#x2713;</span></td></tr>
+      <tr><td>D&iacute;a buffer</td><td class="col-a"><span class="cross">&#x2717;</span></td><td class="col-b"><span class="check">&#x2713;</span></td><td class="col-c"><span class="check">&#x2713;</span></td><td class="col-d">Semi</td></tr>
+      <tr><td>Coste extra vs A</td><td class="col-a best">&mdash;</td><td class="col-b">~50&euro;</td><td class="col-c">~200&euro;</td><td class="col-d">~350&euro;</td></tr>
+      <tr><td>Para qui&eacute;n</td><td class="col-a">Simplicidad m&aacute;xima</td><td class="col-b">Mejor ruta</td><td class="col-c">M&aacute;s ciudades</td><td class="col-d">Verlo todo</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- ══ TRANSPORTE ════════════════════════════════════════ -->
+  <h2 class="section-title" id="transporte">Red de transporte verificada</h2>
+  <p style="color:var(--muted);font-size:.82rem;margin-bottom:.85rem">Fuentes: Wikipedia (FSE/Trenitalia/Ferrotramviaria), Rome2Rio &mdash; mayo 2026</p>
+  <div class="transport-grid">
+    <div class="t-card">
+      <h4>&#x2705; Conexiones clave</h4>
+      <ul>
+        <li>Brindisi &harr; Lecce: Trenitalia 25 min</li>
+        <li>Brindisi &rarr; Taranto: Trenitalia 55-65 min</li>
+        <li>Lecce &rarr; Otranto: Bus STP Salento ~50-60 min (&#x2757; tren: 2h26 con 2 cambios)</li>
+        <li>Bari &rarr; Polignano: Trenitalia 30-35 min</li>
+        <li>Polignano &rarr; Ostuni: Trenitalia 25 min</li>
+        <li>Bari &rarr; Trani: Trenitalia 35 min</li>
+        <li>Bari &rarr; Andria: Ferrotramviaria ~60 min</li>
+        <li>Andria &rarr; Castel del Monte: navetta estiva ~20 min (jul-ago)</li>
+        <li>Bari &rarr; Alberobello: FSE ~1.5h (cambio Putignano)</li>
+        <li>Bari &rarr; Altamura: FAL tren ~50 min</li>
+        <li>Altamura &rarr; Gravina: FAL tren ~15 min</li>
+      </ul>
+    </div>
+    <div class="t-card t-warn">
+      <h4>&#x274C; Conexiones problem&aacute;ticas</h4>
+      <ul>
+        <li>Alberobello &rarr; Ostuni directo: 2h+, 9 buses/semana. INVIABLE.</li>
+        <li>Andria &rarr; Trani en tren: CORTADA (obras raddoppio). Usar bus STP BAT ~25 min.</li>
+        <li>Lecce &rarr; Taranto directo: NO EXISTE. V&iacute;a Brindisi obligatorio.</li>
+        <li>FSE domingo Taranto &rarr; Martina Franca: SIN TRENES. Solo bus sustitutivo.</li>
+      </ul>
+    </div>
+    <div class="t-card">
+      <h4>FSE Bari-Taranto &mdash; estado jul 2026</h4>
+      <ul>
+        <li>Opera en 3 tramos separados (cambio en Putignano y Martina Franca)</li>
+        <li>S&aacute;bados = d&iacute;a laborable &rarr; servicio normal</li>
+        <li>Domingos: Martina Franca&harr;Taranto = solo bus sustitutivo FSE</li>
+        <li>Domingos: tramos hacia Bari S&Iacute; tienen trenes (5 directos Bari&harr;M.Franca)</li>
+        <li>Tramo Bari-Putignano: reabrir&aacute; antes del 30 julio 2026 &#x2705;</li>
+      </ul>
+    </div>
+    <div class="t-card">
+      <h4>D&iacute;a Trani + Castel del Monte</h4>
+      <ul>
+        <li>AM: Ferrotramviaria Bari &rarr; Andria (~60 min)</li>
+        <li>Navetta estiva Andria &rarr; CDM (~20 min, opera jul-ago)</li>
+        <li>Visita CDM (1.5-2h)</li>
+        <li>Bus STP BAT Andria &rarr; Trani (~25 min)</li>
+        <li>Visita Trani (catedral + centro + almuerzo)</li>
+        <li>Trenitalia Trani &rarr; Bari (35 min)</li>
+        <li><em>Plan B: Ferrotramviaria vuelta Andria&rarr;Bari + Trenitalia Bari&rarr;Trani</em></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ══ NOTAS CIUDADES ════════════════════════════════════ -->
+  <h2 class="section-title" id="notas">Notas por destino</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1rem;margin-top:.5rem">
+    <div class="t-card"><h4>&#x1F535; Otranto (solo D)</h4><ul>
+      <li>Catedral 1088: mosaico suelo 1166 &mdash; 10M teselas (&Aacute;rbol de la Vida, zodíaco, Alejandro Magno)</li>
+      <li>800 M&aacute;rtires: cr&aacute;neos expuestos detrás del altar (canonizados 2013)</li>
+      <li>Cripta: 42 columnas de m&aacute;rmol, todas distintas</li>
+      <li>San Pietro: frescos bizantinos siglo X</li>
+      <li>Primera novela g&oacute;tica de la historia ambientada aqu&iacute; (Walpole, 1764)</li>
+      <li>Bus STP desde Lecce ~50 min (frecuente en verano)</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E4; Ostuni</h4><ul>
+      <li>&#x26A0;&#xFE0F; Estaci&oacute;n 3 km ABAJO del centro hist&oacute;rico</li>
+      <li>Bus STP o taxi (~8&euro;) para subir al casco antiguo</li>
+      <li>Catedral + callejuelas blancas + Museo Civilt&agrave; Preclassiche = 2-3h</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E4; Matera</h4><ul>
+      <li>2 Sassi distintos (m&iacute;nimo 6h para hacer justicia)</li>
+      <li>Iglesias rupestres: San Pietro Caveoso, Santa Lucia alle Malve</li>
+      <li>Palombaro Lungo: cisterna gigante bajo Piazza Vittorio Veneto</li>
+      <li>Bus Bari&rarr;Matera: ~1h (Itabus/FlixBus, desde 3&euro;)</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E4; Alberobello</h4><ul>
+      <li>Rione Monti (~1000 trulli) &mdash; tur&iacute;stico pero imprescindible</li>
+      <li>Rione Aia Piccola &mdash; trulli habitados, m&aacute;s aut&eacute;ntico</li>
+      <li>Mejor antes de las 10:00 o al atardecer (luz dorada)</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E4; Castel del Monte</h4><ul>
+      <li>Aislado en colina, no en ning&uacute;n pueblo</li>
+      <li>Solo accesible: navetta estiva desde Andria (jul-ago) o taxi</li>
+      <li>L&iacute;nea Ferrotramviaria Andria-Barletta CERRADA &mdash; Andria Sur es terminus</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E2; Gravina in Puglia (C+D)</h4><ul>
+      <li>Ca&ntilde;&oacute;n k&aacute;rstico ~50m que cruza la ciudad</li>
+      <li>Ponte Viadotto: escenario cinematogr&aacute;fico (James Bond)</li>
+      <li>San Michele delle Grotte: iglesia rupestre siglo IX, frescos bizantinos</li>
+      <li>CERO turismo masivo &mdash; autenticidad pura</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E2; Altamura (C+D)</h4><ul>
+      <li>Pan DOP: el m&aacute;s famoso de Italia. Hornos activos desde siglo XV.</li>
+      <li>Catedral Federico II (1232): rosone espectacular</li>
+      <li>Pulo di Altamura: sinkhole k&aacute;rstico de 500m de di&aacute;metro</li>
+      <li>Hombre de Altamura: ADN neandertal de 150.000 a&ntilde;os</li>
+    </ul></div>
+    <div class="t-card"><h4>&#x1F7E3; Martina Franca (B+C+D)</h4><ul>
+      <li>Palazzo Ducale: frescos barrocos de Domenico Carella (Sala dell'Arcadia)</li>
+      <li>Festival della Valle d'Itria: &oacute;pera julio-agosto</li>
+      <li>Capocollo DOP exclusivo de aqu&iacute;</li>
+      <li>Parada "gratis" en la ruta FSE</li>
+    </ul></div>
+  </div>
+
+  <!-- ══ PENDIENTE ═════════════════════════════════════════ -->
+  <h2 class="section-title" id="pendiente">Decisiones pendientes</h2>
+  <div style="background:#fff;border-radius:8px;border:1px solid var(--border);padding:1.25rem;font-size:.85rem">
+    <ul style="list-style:none;padding:0">
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x2705; <s>&iquest;Se puede volar s&aacute;bado 8 agosto desde Bari?</s> &rarr; <strong>S&Iacute;, confirmado</strong></li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; <strong>Elegir opci&oacute;n final:</strong> A (11, 2H) &middot; B (12, 3H) &middot; C (14, 3H) &middot; D (16, 4H)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Verificar horarios FSE s&aacute;bado 1 agosto 2026 (fssudest.it)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Verificar navetta estiva Andria &rarr; Castel del Monte (horarios agosto)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Bus STP BAT Andria &rarr; Trani (horarios)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Horarios FAL Bari &rarr; Altamura &rarr; Gravina</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Bus STP Salento Lecce &rarr; Otranto (frecuencia agosto)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; &iquest;Hay bus directo Lecce &rarr; Taranto (evitar tri&aacute;ngulo v&iacute;a Brindisi)?</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Seleccionar hoteles (Brindisi &middot; Lecce si D &middot; Taranto &middot; Bari)</li>
+      <li style="padding:.3rem 0;border-bottom:1px solid var(--border)">&#x25A1; Buscar restaurantes por ciudad</li>
+      <li style="padding:.3rem 0">&#x25A1; Entradas anticipadas: MArTA &middot; Castel del Monte &middot; Matera iglesias &middot; Otranto catedral</li>
+    </ul>
+  </div>
+
+</main>
+
+<footer style="background:#2c2c2c;color:#aaa;text-align:center;padding:1.25rem;font-size:.78rem;margin-top:1rem">
+  Gu&iacute;a Puglia 2026 &mdash; generada el 29 mayo 2026 &middot; Ctrl+P para versi&oacute;n PDF
+</footer>
+
+</body>
+</html>
