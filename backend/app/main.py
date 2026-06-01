@@ -101,6 +101,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # ---------------------------------------------------------------------------
 
 app.include_router(endpoints.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(endpoints.router, prefix="/finance/api/portfolio", tags=["portfolio"])
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -108,6 +109,7 @@ app.include_router(endpoints.router, prefix="/api/portfolio", tags=["portfolio"]
 
 
 @app.get("/api/health", tags=["system"])
+@app.get("/finance/api/health", tags=["system"])
 def health_check():
     """Endpoint de salud."""
     return {"status": "ok", "version": app.version}
@@ -130,6 +132,14 @@ if FRONTEND_DIR.is_dir():
         file_path = FRONTEND_DIR / full_path
         if full_path and file_path.is_file():
             return FileResponse(str(file_path))
+        
+        # Fallback for prefixed static files when ROOT_PATH is not active
+        if full_path.startswith("finance/"):
+            stripped_path = full_path.replace("finance/", "", 1)
+            file_path_stripped = FRONTEND_DIR / stripped_path
+            if file_path_stripped.is_file():
+                return FileResponse(str(file_path_stripped))
+                
         return FileResponse(str(FRONTEND_DIR / "index.html"))
 
     app.mount(
@@ -139,3 +149,10 @@ if FRONTEND_DIR.is_dir():
         else StaticFiles(directory=str(FRONTEND_DIR)),
         name="assets",
     )
+
+    if (FRONTEND_DIR / "assets").is_dir():
+        app.mount(
+            "/finance/assets",
+            StaticFiles(directory=str(FRONTEND_DIR / "assets")),
+            name="finance_assets",
+        )
