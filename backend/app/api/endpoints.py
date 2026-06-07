@@ -9,7 +9,7 @@ positions, open-lots, tax-optimize, fund details, fund search,
 simulate, evolution-metrics, performance, traspaso-analysis, upload-orders.
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
 import logging
 import os
 import shutil
@@ -2303,3 +2303,48 @@ async def refresh_provider_for_isin_with_choice(
     background_tasks.add_task(_do_download)
     return {"message": f"✅ Descarga iniciada para {isin} desde {provider}. Los datos estarán disponibles en breve."}
 
+@router.post("/upload-orders")
+async def upload_orders(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    source_type: str = Form(...)
+):
+    """Sube un fichero de órdenes y actualiza la fuente de datos correspondiente."""
+    from ..services.portfolio_service import (
+        DATA_DIR,
+        CSV_PATH_CANONICAL,
+        TRADEREPUBLIC_CSV_PATH_CANONICAL,
+        MYINVESTOR_ETF_PATH_CANONICAL,
+        reset_client,
+        run_analytics_pipeline
+    )
+    
+    # Determinar ruta de destino
+    if source_type == "myinvestor_fondos":
+        # Usar la extensión original subida
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in [".csv", ".tsv", ".xlsx"]:
+            ext = ".csv"
+        target_path = DATA_DIR / f"myinvestor_fondos{ext}"
+    elif source_type == "traderepublic_etfs":
+        target_path = TRADEREPUBLIC_CSV_PATH_CANONICAL
+    elif source_type == "myinvestor_etfs":
+        target_path = MYINVESTOR_ETF_PATH_CANONICAL
+    else:
+        raise HTTPException(status_code=400, detail="Tipo de fuente no válido.")
+
+    # Guardar archivo
+    try:
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        logger.exception("Error guardando el archivo subido.")
+        raise HTTPException(status_code=500, detail="Error al guardar el fichero.")
+    finally:
+        file.file.close()
+
+    # Forzar recálculo
+    reset_client()
+    background_tasks.add_task(run_analytics_pipeline, force_download=False)
+
+    return {"message": "Fichero cargado y procesado con éxito. Recalculando cartera..."}

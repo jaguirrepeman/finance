@@ -423,4 +423,24 @@ export const api = {
     request<{ message: string }>(`/providers-status/refresh/${isin}/provider/${provider}`, {
       method: "POST",
     }),
+
+  /** POST /api/portfolio/upload-orders */
+  uploadOrdersFile: async (file: File, sourceType: string) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("source_type", sourceType);
+
+    const url = `${BASE_URL}/upload-orders`;
+    const res = await fetch(url, {
+      method: "POST",
+      body: formData,
+      // No Content-Type header so the browser sets it to multipart/form-data with boundary
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "Unknown error");
+      throw new ApiError(res.status, `${res.status}: ${body}`);
+    }
+    return res.json() as Promise<{ message: string }>;
+  },
 } as const;

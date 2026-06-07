@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router";
 import { RefreshCw } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
+import { UploadOrdersModal } from "./upload-orders-modal";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { cn } from "@/lib/utils";
@@ -43,6 +44,7 @@ const PREFETCH: Record<string, (qc: ReturnType<typeof useQueryClient>) => void> 
 
 export function DashboardLayout() {
   const [refreshing, setRefreshing] = useState(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
   // Eagerly prefetch the most critical data so tabs feel instant
@@ -77,20 +79,31 @@ export function DashboardLayout() {
         <h1 className="gradient-text text-3xl font-bold tracking-tight md:text-4xl">
           Portfolio Tracker
         </h1>
-        <button
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className={cn(
-            "glass-panel-sm flex items-center gap-2 px-4 py-2 text-sm font-medium",
-            "text-text-secondary transition-colors hover:text-accent-glow",
-            "disabled:opacity-50 disabled:cursor-not-allowed",
-          )}
-        >
-          <RefreshCw
-            className={cn("h-4 w-4", refreshing && "animate-spin")}
-          />
-          Recalcular
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsUploadModalOpen(true)}
+            className={cn(
+              "glass-panel-sm flex items-center gap-2 px-4 py-2 text-sm font-medium",
+              "text-text-secondary transition-colors hover:text-accent-glow"
+            )}
+          >
+            Subir Fichero
+          </button>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className={cn(
+              "glass-panel-sm flex items-center gap-2 px-4 py-2 text-sm font-medium",
+              "text-text-secondary transition-colors hover:text-accent-glow",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+            )}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4", refreshing && "animate-spin")}
+            />
+            Recalcular
+          </button>
+        </div>
       </header>
 
       {/* Tab navigation */}
@@ -119,6 +132,12 @@ export function DashboardLayout() {
       <main>
         <Outlet />
       </main>
+
+      {/* Modals */}
+      <UploadOrdersModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+      />
     </div>
   );
 }

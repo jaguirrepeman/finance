@@ -37,11 +37,19 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = _BASE_DIR / "data"
 CACHE_DIR = DATA_DIR / "calculated"
+# Fuentes principales (MyInvestor Fondos)
+CSV_PATH_CANONICAL = DATA_DIR / "myinvestor_fondos.csv"
+TSV_PATH_CANONICAL = DATA_DIR / "myinvestor_fondos.tsv"
+EXCEL_PATH_CANONICAL = DATA_DIR / "myinvestor_fondos.xlsx"
+
+# Fuentes adicionales de ETFs
+MYINVESTOR_ETF_PATH_CANONICAL = DATA_DIR / "myinvestor_etfs.xlsx"
+TRADEREPUBLIC_CSV_PATH_CANONICAL = DATA_DIR / "traderepublic_etfs.csv"
+
+# Legacy paths (for backward compatibility)
 CSV_PATH = DATA_DIR / "Órdenes 1238478.csv"
 TSV_PATH = DATA_DIR / "Órdenes 1238478.tsv"
 EXCEL_PATH = DATA_DIR / "Ordenes.xlsx"
-
-# Fuentes adicionales de ETFs
 MYINVESTOR_ETF_PATH = DATA_DIR / "MyInvestorETF.xlsx"
 TRADEREPUBLIC_CSV_PATH = DATA_DIR / "Exportación de transacción.csv"
 
@@ -68,38 +76,42 @@ def _load_etf_sources(client) -> None:
     etf_isins: set = set()
 
     # --- MyInvestor ETF ---
-    if MYINVESTOR_ETF_PATH.exists():
+    mi_etf_path = MYINVESTOR_ETF_PATH_CANONICAL if MYINVESTOR_ETF_PATH_CANONICAL.exists() else MYINVESTOR_ETF_PATH
+    if mi_etf_path.exists():
         try:
-            df_mi = Portfolio._normalize_myinvestor_etf_df(str(MYINVESTOR_ETF_PATH))
+            df_mi = Portfolio._normalize_myinvestor_etf_df(str(mi_etf_path))
             isins_mi = set(df_mi["ISIN"].dropna().unique())
             etf_isins.update(isins_mi)
             client.portfolio.load_extra_orders(df_mi, etf_isins=isins_mi)
             logger.info(
-                "MyInvestorETF: cargadas %d \u00f3rdenes (%d ISINs distintos)",
+                "MyInvestorETF: cargadas %d órdenes (%d ISINs distintos) desde %s",
                 len(df_mi),
                 len(isins_mi),
+                mi_etf_path.name
             )
         except Exception:
-            logger.exception("Error cargando MyInvestorETF.xlsx; se omite.")
+            logger.exception("Error cargando %s; se omite.", mi_etf_path.name)
     else:
-        logger.debug("MyInvestorETF.xlsx no encontrado en %s", MYINVESTOR_ETF_PATH)
+        logger.debug("MyInvestorETF no encontrado en %s ni %s", MYINVESTOR_ETF_PATH_CANONICAL, MYINVESTOR_ETF_PATH)
 
     # --- TradeRepublic TRADING ---
-    if TRADEREPUBLIC_CSV_PATH.exists():
+    tr_etf_path = TRADEREPUBLIC_CSV_PATH_CANONICAL if TRADEREPUBLIC_CSV_PATH_CANONICAL.exists() else TRADEREPUBLIC_CSV_PATH
+    if tr_etf_path.exists():
         try:
-            df_tr = Portfolio._normalize_traderepublic_df(str(TRADEREPUBLIC_CSV_PATH))
+            df_tr = Portfolio._normalize_traderepublic_df(str(tr_etf_path))
             isins_tr = set(df_tr["ISIN"].dropna().unique())
             etf_isins.update(isins_tr)
             client.portfolio.load_extra_orders(df_tr, etf_isins=isins_tr)
             logger.info(
-                "TradeRepublic TRADING: cargadas %d \u00f3rdenes (%d ISINs distintos)",
+                "TradeRepublic TRADING: cargadas %d órdenes (%d ISINs distintos) desde %s",
                 len(df_tr),
                 len(isins_tr),
+                tr_etf_path.name
             )
         except Exception:
-            logger.exception("Error cargando Exportaci\u00f3n de transacci\u00f3n.csv; se omite.")
+            logger.exception("Error cargando %s; se omite.", tr_etf_path.name)
     else:
-        logger.debug("TradeRepublic CSV no encontrado en %s", TRADEREPUBLIC_CSV_PATH)
+        logger.debug("TradeRepublic CSV no encontrado en %s ni %s", TRADEREPUBLIC_CSV_PATH_CANONICAL, TRADEREPUBLIC_CSV_PATH)
 
 
 def _get_orders_source() -> Optional[str]:
@@ -109,6 +121,15 @@ def _get_orders_source() -> Optional[str]:
     El CSV del broker ya exporta participaciones con coma decimal correcta,
     evitando los problemas de localización del TSV/Excel español.
     """
+    # Buscar en rutas canónicas primero
+    if CSV_PATH_CANONICAL.exists():
+        return str(CSV_PATH_CANONICAL)
+    if TSV_PATH_CANONICAL.exists():
+        return str(TSV_PATH_CANONICAL)
+    if EXCEL_PATH_CANONICAL.exists():
+        return str(EXCEL_PATH_CANONICAL)
+
+    # Fallback a rutas legacy
     if CSV_PATH.exists():
         return str(CSV_PATH)
     tsv_exists = TSV_PATH.exists()
