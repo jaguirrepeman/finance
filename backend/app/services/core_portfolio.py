@@ -156,6 +156,8 @@ class Portfolio:
             raise FileNotFoundError(f"Archivo no encontrado: {filepath}")
         df = pd.read_csv(filepath, sep=";", encoding="utf-8", dtype=str)
         self._process_orders_df(df)
+        if not self.movements.empty:
+            self.movements["Fuente"] = "MyInvestor Fondos"
 
     def _load_from_tsv(self, filepath: str) -> None:
         """Lee el TSV de órdenes (separado por tabulador) y delega a _process_orders_df.
