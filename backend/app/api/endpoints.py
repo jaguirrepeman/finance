@@ -1459,33 +1459,10 @@ async def get_annual_returns():
     return response
 
 
-@router.post("/upload-orders")
-async def upload_orders(file: UploadFile = File(...)):
-    """Sube el fichero de órdenes (TSV del broker o Excel) y recalcula todo."""
-    fname = file.filename or ""
-    if fname.endswith(".tsv"):
-        dest = TSV_PATH
-    elif fname.endswith((".xlsx", ".xls")):
-        dest = EXCEL_PATH
-    else:
-        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .tsv, .xlsx o .xls")
-
-    # Guardar archivo
-    try:
-        with open(dest, "wb") as f:
-            content = await file.read()
-            f.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error guardando archivo: {e}")
-
-    # Resetear y recalcular
-    reset_client()
-    try:
-        run_analytics_pipeline(force_download=True)
-    except Exception as e:
-        return {"message": f"⚠️ Fichero guardado pero hubo un error al procesar: {e}"}
-
-    return {"message": f"✅ Fichero de órdenes ({fname}) actualizado y portfolio recalculado."}
+# NOTA: el endpoint POST /upload-orders se define más abajo (ver
+# upload_orders con soporte de source_type para MyInvestor Fondos/ETFs
+# y Trade Republic). La versión antigua que vivía aquí quedaba eclipsada
+# por aquélla en el enrutado de FastAPI, así que se ha eliminado.
 
 
 # =========================================================================

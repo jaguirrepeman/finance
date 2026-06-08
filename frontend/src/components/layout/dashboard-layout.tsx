@@ -1,21 +1,33 @@
 import { NavLink, Outlet } from "react-router";
-import { RefreshCw } from "lucide-react";
+import {
+  RefreshCw,
+  LayoutDashboard,
+  PieChart,
+  TrendingUp,
+  Target,
+  Calculator,
+  Banknote,
+  Briefcase,
+  Star,
+  Database,
+} from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
 import { UploadOrdersModal } from "./upload-orders-modal";
+import { MobileNav, type NavTab } from "./mobile-nav";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { cn } from "@/lib/utils";
 
-const TABS = [
-  { to: "/", label: "General", end: true },
-  { to: "/details", label: "Detalles" },
-  { to: "/evolution", label: "Evolución" },
-  { to: "/opportunities", label: "Oportunidades" },
-  { to: "/simulator", label: "Proyección" },
-  { to: "/withdrawals", label: "Retiradas" },
-  { to: "/portfolios", label: "Carteras" },
-  { to: "/favoritos", label: "Favoritos" },
-  { to: "/providers", label: "Proveedores" },
+const TABS: readonly NavTab[] = [
+  { to: "/", label: "General", end: true, icon: LayoutDashboard },
+  { to: "/details", label: "Detalles", icon: PieChart },
+  { to: "/evolution", label: "Evolución", icon: TrendingUp },
+  { to: "/opportunities", label: "Oportunidades", icon: Target },
+  { to: "/simulator", label: "Proyección", icon: Calculator },
+  { to: "/withdrawals", label: "Retiradas", icon: Banknote },
+  { to: "/portfolios", label: "Carteras", icon: Briefcase },
+  { to: "/favoritos", label: "Favoritos", icon: Star },
+  { to: "/providers", label: "Proveedores", icon: Database },
 ] as const;
 
 const STABLE = { staleTime: Infinity, gcTime: Infinity } as const;
@@ -72,8 +84,13 @@ export function DashboardLayout() {
     }
   }, [queryClient]);
 
+  const handlePrefetch = useCallback(
+    (to: string) => PREFETCH[to]?.(queryClient),
+    [queryClient],
+  );
+
   return (
-    <div className="mx-auto max-w-[1440px] px-4 py-6 md:px-8">
+    <div className="mx-auto max-w-[1440px] px-4 py-6 pb-24 md:px-8 md:pb-6">
       {/* Header */}
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="gradient-text text-3xl font-bold tracking-tight md:text-4xl">
@@ -106,8 +123,8 @@ export function DashboardLayout() {
         </div>
       </header>
 
-      {/* Tab navigation */}
-      <nav className="mb-6 flex gap-1 overflow-x-auto rounded-2xl border border-border-glass bg-bg-glass/30 p-1">
+      {/* Tab navigation (escritorio) — en móvil se usa la barra inferior */}
+      <nav className="mb-6 hidden gap-1 overflow-x-auto rounded-2xl border border-border-glass bg-bg-glass/30 p-1 md:flex">
         {TABS.map((tab) => (
           <NavLink
             key={tab.to}
@@ -132,6 +149,9 @@ export function DashboardLayout() {
       <main>
         <Outlet />
       </main>
+
+      {/* Navegación inferior (solo móvil) */}
+      <MobileNav tabs={TABS} primaryCount={4} onPrefetch={handlePrefetch} />
 
       {/* Modals */}
       <UploadOrdersModal

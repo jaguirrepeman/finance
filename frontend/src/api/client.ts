@@ -424,23 +424,50 @@ export const api = {
       method: "POST",
     }),
 
-  /** POST /api/portfolio/upload-orders */
-  uploadOrdersFile: async (file: File, sourceType: string) => {
+  /**
+   * POST /api/portfolio/upload-orders
+   *
+   * Usa XMLHttpRequest en lugar de fetch para poder reportar el progreso
+   * de subida (fetch no expone eventos de progreso de upload). El callback
+   * onProgress recibe un porcentaje 0-100.
+   */
+  uploadOrdersFile: (
+    file: File,
+    sourceType: string,
+    onProgress?: (percent: number) => void,
+  ): Promise<{ message: string }> => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("source_type", sourceType);
 
     const url = `${BASE_URL}/upload-orders`;
-    const res = await fetch(url, {
-      method: "POST",
-      body: formData,
-      // No Content-Type header so the browser sets it to multipart/form-data with boundary
-    });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "Unknown error");
-      throw new ApiError(res.status, `${res.status}: ${body}`);
-    }
-    return res.json() as Promise<{ message: string }>;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+
+      if (onProgress && xhr.upload) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            onProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            resolve({ message: xhr.responseText || "OK" });
+          }
+        } else {
+          reject(new ApiError(xhr.status, `${xhr.status}: ${xhr.responseText || "Error"}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new ApiError(0, "Error de red al subir el fichero."));
+      xhr.send(formData);
+    });
   },
 } as const;
