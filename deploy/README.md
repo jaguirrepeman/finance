@@ -27,6 +27,13 @@ systemctl restart portfolio-tracker (FastAPI en :8000)
 - `portfolio-tracker.service` — FastAPI backend (puerto 8000)
 - `portfolio-webhook.service` — GitHub webhook listener (puerto 9000)
 
+> **Coordenadas reales de ESTE despliegue** (los ejemplos genéricos de abajo usan
+> `pi@raspberrypi.local` / `~/Finance`, pero la instalación real es):
+> - **Usuario:** `raspberry` · **IP LAN:** `192.168.1.137` · **Tailscale:** `100.114.2.16`
+> - **Ruta del proyecto:** `~/Documents/finance` (`/home/raspberry/Documents/finance`)
+> - **Acceso SSH:** alias `finance-rpi` en `~/.ssh/config` (clave `~/.ssh/idealista_rpi`)
+> - **Helper:** `bash deploy/pi.sh {where|status|build|deploy|logs|shell}` desde el PC
+
 **Rutas Funnel compartidas:**
 - `/` → idealista_bot (puerto 8501)
 - `/finance` → Portfolio Tracker (puerto 8000)
