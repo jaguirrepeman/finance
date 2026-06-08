@@ -1,34 +1,13 @@
-import { NavLink, Outlet } from "react-router";
-import {
-  RefreshCw,
-  LayoutDashboard,
-  PieChart,
-  TrendingUp,
-  Target,
-  Calculator,
-  Banknote,
-  Briefcase,
-  Star,
-  Database,
-} from "lucide-react";
-import { useState, useCallback, useEffect } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
+import { RefreshCw, Upload } from "lucide-react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { UploadOrdersModal } from "./upload-orders-modal";
-import { MobileNav, type NavTab } from "./mobile-nav";
+import { MobileNav } from "./mobile-nav";
+import { TABS, TAB_PATHS } from "./nav-tabs";
+import { useAppGestures } from "@/hooks/use-app-gestures";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { cn } from "@/lib/utils";
-
-const TABS: readonly NavTab[] = [
-  { to: "/", label: "General", end: true, icon: LayoutDashboard },
-  { to: "/details", label: "Detalles", icon: PieChart },
-  { to: "/evolution", label: "Evolución", icon: TrendingUp },
-  { to: "/opportunities", label: "Oportunidades", icon: Target },
-  { to: "/simulator", label: "Proyección", icon: Calculator },
-  { to: "/withdrawals", label: "Retiradas", icon: Banknote },
-  { to: "/portfolios", label: "Carteras", icon: Briefcase },
-  { to: "/favoritos", label: "Favoritos", icon: Star },
-  { to: "/providers", label: "Proveedores", icon: Database },
-] as const;
 
 const STABLE = { staleTime: Infinity, gcTime: Infinity } as const;
 
@@ -58,6 +37,8 @@ export function DashboardLayout() {
   const [refreshing, setRefreshing] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const queryClient = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   // Eagerly prefetch the most critical data so tabs feel instant
   useEffect(() => {
@@ -89,36 +70,88 @@ export function DashboardLayout() {
     [queryClient],
   );
 
+  // --- Navegación por deslizamiento (móvil) ---
+  const currentIdx = TAB_PATHS.indexOf(location.pathname);
+  const goRelative = useCallback(
+    (delta: number) => {
+      const i = TAB_PATHS.indexOf(location.pathname);
+      if (i === -1) return; // ruta fuera del set de pestañas → no navegar
+      const next = i + delta;
+      if (next < 0 || next >= TAB_PATHS.length) return; // sin wrap-around
+      handlePrefetch(TAB_PATHS[next]);
+      navigate(TAB_PATHS[next]);
+    },
+    [location.pathname, navigate, handlePrefetch],
+  );
+
+  const { ref: gestureRef, pull, refreshing: pulling } = useAppGestures({
+    onSwipeLeft: () => goRelative(1),
+    onSwipeRight: () => goRelative(-1),
+    onPull: handleRefresh,
+  });
+
+  // --- Dirección de la transición (según el orden de pestañas) ---
+  const [dir, setDir] = useState(1);
+  const prevIdxRef = useRef(currentIdx);
+  useEffect(() => {
+    if (currentIdx !== -1 && prevIdxRef.current !== -1 && currentIdx !== prevIdxRef.current) {
+      setDir(currentIdx > prevIdxRef.current ? 1 : -1);
+    }
+    prevIdxRef.current = currentIdx;
+  }, [currentIdx]);
+
+  const pullY = pulling ? 50 : pull;
+
   return (
     <div className="mx-auto max-w-[1440px] px-4 py-6 pb-24 md:px-8 md:pb-6">
+      {/* Indicador de pull-to-refresh (solo móvil) */}
+      <div
+        className="pointer-events-none fixed inset-x-0 top-0 z-[8000] flex justify-center md:hidden"
+        style={{
+          transform: `translateY(${pullY}px)`,
+          opacity: pullY > 6 ? 1 : 0,
+          transition: pull > 0 && !pulling ? "none" : "transform .2s ease, opacity .2s ease",
+        }}
+      >
+        <div className="glass-panel-sm mt-1 rounded-full p-2">
+          <RefreshCw
+            className={cn(
+              "h-5 w-5 text-accent-glow",
+              (pulling || pull >= 70) && "animate-spin",
+            )}
+          />
+        </div>
+      </div>
+
       {/* Header */}
-      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="gradient-text text-3xl font-bold tracking-tight md:text-4xl">
+      <header className="mb-6 flex flex-row items-center justify-between gap-3 md:mb-8">
+        <h1 className="gradient-text text-2xl font-bold tracking-tight sm:text-3xl md:text-4xl">
           Portfolio Tracker
         </h1>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => setIsUploadModalOpen(true)}
+            aria-label="Subir fichero"
             className={cn(
-              "glass-panel-sm flex items-center gap-2 px-4 py-2 text-sm font-medium",
-              "text-text-secondary transition-colors hover:text-accent-glow"
+              "glass-panel-sm flex items-center gap-2 px-3 py-2 text-sm font-medium sm:px-4",
+              "text-text-secondary transition-colors hover:text-accent-glow",
             )}
           >
-            Subir Fichero
+            <Upload className="h-4 w-4" />
+            <span className="hidden sm:inline">Subir Fichero</span>
           </button>
           <button
             onClick={handleRefresh}
             disabled={refreshing}
+            aria-label="Recalcular"
             className={cn(
-              "glass-panel-sm flex items-center gap-2 px-4 py-2 text-sm font-medium",
+              "glass-panel-sm flex items-center gap-2 px-3 py-2 text-sm font-medium sm:px-4",
               "text-text-secondary transition-colors hover:text-accent-glow",
               "disabled:opacity-50 disabled:cursor-not-allowed",
             )}
           >
-            <RefreshCw
-              className={cn("h-4 w-4", refreshing && "animate-spin")}
-            />
-            Recalcular
+            <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+            <span className="hidden sm:inline">Recalcular</span>
           </button>
         </div>
       </header>
@@ -129,7 +162,7 @@ export function DashboardLayout() {
           <NavLink
             key={tab.to}
             to={tab.to}
-            end={"end" in tab ? tab.end : undefined}
+            end={tab.end}
             onMouseEnter={() => PREFETCH[tab.to]?.(queryClient)}
             className={({ isActive }) =>
               cn(
@@ -145,9 +178,14 @@ export function DashboardLayout() {
         ))}
       </nav>
 
-      {/* Tab content */}
-      <main>
-        <Outlet />
+      {/* Tab content — contenedor de gestos táctiles */}
+      <main ref={gestureRef} className="overflow-x-hidden">
+        <div
+          key={location.pathname}
+          className={cn("page-transition", dir >= 0 ? "page-from-right" : "page-from-left")}
+        >
+          <Outlet />
+        </div>
       </main>
 
       {/* Navegación inferior (solo móvil) */}

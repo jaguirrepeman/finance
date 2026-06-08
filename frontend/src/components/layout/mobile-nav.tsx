@@ -1,15 +1,8 @@
 import { useState } from "react";
 import { NavLink } from "react-router";
 import { MoreHorizontal, X } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-export interface NavTab {
-  to: string;
-  label: string;
-  end?: boolean;
-  icon: LucideIcon;
-}
+import type { NavTab } from "./nav-tabs";
 
 interface MobileNavProps {
   tabs: readonly NavTab[];
