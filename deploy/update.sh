@@ -95,10 +95,20 @@ echo ""
 # =============================================================================
 # 4. Reiniciar servicios
 # =============================================================================
-echo "[4/4] Reiniciando servicios..."
+echo "[4/4] Reiniciando el backend..."
+
+# Comprobación temprana: el reinicio necesita sudo SIN contraseña (no hay TTY
+# cuando lo dispara el webhook). install_service.sh instala la regla sudoers.
+if ! sudo -n systemctl is-active portfolio-tracker >/dev/null 2>&1 \
+     && ! sudo -n true 2>/dev/null; then
+    echo " ✘ sudo sin contraseña no disponible para reiniciar el servicio."
+    echo "   Ejecuta una vez:  bash deploy/install_service.sh"
+    echo "   (instala /etc/sudoers.d/portfolio-tracker)"
+    exit 1
+fi
 
 if systemctl is-active --quiet portfolio-tracker; then
-    sudo systemctl restart portfolio-tracker
+    sudo -n systemctl restart portfolio-tracker
     sleep 2
     if systemctl is-active --quiet portfolio-tracker; then
         echo " ✔ portfolio-tracker reiniciado correctamente."
@@ -111,17 +121,11 @@ else
     echo " ⚠ portfolio-tracker no estaba ejecutándose."
 fi
 
-if systemctl is-active --quiet portfolio-webhook; then
-    sudo systemctl restart portfolio-webhook
-    sleep 1
-    if systemctl is-active --quiet portfolio-webhook; then
-        echo " ✔ portfolio-webhook reiniciado correctamente."
-    else
-        echo " ✘ portfolio-webhook falló al reiniciar."
-    fi
-else
-    echo " ⚠ portfolio-webhook no estaba ejecutándose."
-fi
+# NOTA: NO reiniciamos portfolio-webhook aquí. Este script corre como hijo del
+# propio webhook; reiniciarlo mataría el deploy a medias (kill del cgroup).
+# hooks.json se regenera solo al arrancar el webhook (ExecStartPre). Si cambias
+# el secreto o el servicio del webhook, reinícialo a mano:
+#   sudo systemctl restart portfolio-webhook
 
 echo ""
 

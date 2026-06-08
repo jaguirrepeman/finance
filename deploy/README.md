@@ -134,27 +134,28 @@ Esto:
 
 ### Paso 5 — Configurar webhook en GitHub
 
-1. **Generar un secret aleatorio** (32+ caracteres):
-   ```bash
-   openssl rand -hex 32
-   ```
+El secreto **no se versiona**: vive en `deploy/webhook.env` (git-ignorado) y
+`install_service.sh` lo genera automáticamente. `hooks.json` ya no se edita a
+mano — lo regenera `render_hooks.sh` en cada arranque del listener (vía
+`ExecStartPre`), de modo que sobrevive al `git reset --hard` de cada deploy.
 
-2. **Editar `deploy/hooks.json`:**
+1. **Obtener el secreto generado.** `install_service.sh` (Paso 3) ya creó
+   `deploy/webhook.env` y mostró el secreto por pantalla. Para verlo de nuevo:
    ```bash
-   nano deploy/hooks.json
-   # Cambia 'YOUR_WEBHOOK_SECRET_HERE' por el secret generado
+   cat deploy/webhook.env        # WEBHOOK_SECRET=...
    ```
+   Para forzar uno propio antes de instalar: `WEBHOOK_SECRET=$(openssl rand -hex 24) bash deploy/install_service.sh`
 
-3. **Configurar webhook en GitHub:**
+2. **Configurar webhook en GitHub:**
    - Ve a tu repo → Settings → Webhooks → Add webhook
    - **Payload URL:** `https://<host>.tailnet-xxxx.ts.net/hooks/deploy-finance`
    - **Content type:** `application/json`
-   - **Secret:** (el mismo secret de hooks.json)
+   - **Secret:** (el valor de `WEBHOOK_SECRET` en `deploy/webhook.env`)
    - **Events:** Just the push event
    - **Branch:** `main` (o la rama que uses)
    - **Active:** ✓
 
-4. **Reiniciar el webhook listener:**
+3. **Reiniciar el webhook listener** (regenera `hooks.json` con el secreto):
    ```bash
    sudo systemctl restart portfolio-webhook
    ```
@@ -331,7 +332,10 @@ sudo tailscale funnel reset
 │   ├── install_service.sh       # Crear servicios systemd
 │   ├── add_to_funnel.sh         # Configurar Funnel
 │   ├── update.sh                # Script de deploy (llamado por webhook)
-│   ├── hooks.json               # Configuración del webhook
+│   ├── render_hooks.sh          # Genera hooks.json desde el secreto (ExecStartPre)
+│   ├── webhook.env.example      # Plantilla del secreto (copiar a webhook.env, git-ignorado)
+│   ├── sudoers-portfolio.template  # Regla NOPASSWD para reiniciar el backend
+│   ├── hooks.json               # (generado, git-ignorado) configuración del webhook
 │   ├── portfolio-tracker.service
 │   └── portfolio-webhook.service
 ├── logs/
@@ -439,8 +443,10 @@ curl -i http://127.0.0.1:8000/api/health
 
 3. **En GitHub → Settings → Webhooks → Recent Deliveries:**
    - Si "Connection timeout": el Funnel no está activo o el servicio webhook no escucha
-   - Si "401 Unauthorized": el secret no coincide entre GitHub y hooks.json
-   - Si "200 OK" pero no se despliega: revisar `logs/deploy.log`
+   - Si "401 Unauthorized": el secret de GitHub no coincide con `deploy/webhook.env`
+     (tras editar `webhook.env`, `sudo systemctl restart portfolio-webhook`)
+   - Si "200 OK" pero no se despliega: revisar `logs/deploy.log`. Si descarga pero
+     no reinicia, falta la regla sudoers → `bash deploy/install_service.sh`
 
 ### La PWA no muestra el prompt de instalación
 

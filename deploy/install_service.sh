@@ -49,7 +49,7 @@ install_systemd_service() {
 # ---------------------------------------------------------------------------
 # 1. Servicio del backend (FastAPI + uvicorn)
 # ---------------------------------------------------------------------------
-echo "[1/3] Instalando servicio del backend (portfolio-tracker)..."
+echo "[1/4] Instalando servicio del backend (portfolio-tracker)..."
 
 install_systemd_service \
     "$SCRIPT_DIR/portfolio-tracker.service" \
@@ -71,7 +71,35 @@ echo ""
 # ---------------------------------------------------------------------------
 # 2. Webhook listener (para auto-deploy)
 # ---------------------------------------------------------------------------
-echo "[2/3] Instalando webhook listener (portfolio-webhook)..."
+echo "[2/4] Configurando el secreto del webhook (fuera de git)..."
+
+WEBHOOK_ENV="$SCRIPT_DIR/webhook.env"
+if [[ ! -f "$WEBHOOK_ENV" ]]; then
+    if [[ -n "${WEBHOOK_SECRET:-}" ]]; then
+        SECRET="$WEBHOOK_SECRET"
+        echo "   Usando WEBHOOK_SECRET del entorno."
+    elif command -v openssl &>/dev/null; then
+        SECRET="$(openssl rand -hex 24)"
+        echo "   Generado un secreto aleatorio nuevo."
+    else
+        SECRET="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        echo "   Generado un secreto aleatorio nuevo."
+    fi
+    ( umask 077; printf 'WEBHOOK_SECRET=%s\n' "$SECRET" > "$WEBHOOK_ENV" )
+    echo "   ✔ Escrito $WEBHOOK_ENV (modo 600, git-ignorado)."
+    echo ""
+    echo "   ► Configura este MISMO secreto en GitHub:"
+    echo "       Settings → Webhooks → Secret:"
+    echo "       $SECRET"
+    echo ""
+else
+    echo "   ✔ Ya existe $WEBHOOK_ENV; se conserva."
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Webhook listener (para auto-deploy)
+# ---------------------------------------------------------------------------
+echo "[3/4] Instalando webhook listener (portfolio-webhook)..."
 
 # Instalar adnanh/webhook si no existe
 if ! command -v webhook &>/dev/null; then
@@ -88,7 +116,7 @@ sudo systemctl restart portfolio-webhook
 # Esperar a que arranque
 sleep 2
 if systemctl is-active --quiet portfolio-webhook; then
-    echo "   ✔ Webhook listener activo en puerto 9000"
+    echo "   ✔ Webhook listener activo en puerto 9000 (hooks.json regenerado)"
 else
     echo "   ⚠ El webhook no arrancó correctamente. Ver logs:"
     echo "     sudo journalctl -u portfolio-webhook -n 30"
@@ -96,16 +124,26 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 3. Configuración del webhook secret
+# 4. Regla sudoers: reiniciar el backend sin contraseña
 # ---------------------------------------------------------------------------
-echo "[3/3] Configuración del webhook..."
-echo ""
-echo " IMPORTANTE: Debes configurar el webhook secret en:"
-echo "   1. deploy/hooks.json → cambia 'YOUR_WEBHOOK_SECRET_HERE'"
-echo "   2. GitHub repo → Settings → Webhooks → Secret (mismo valor)"
-echo ""
-echo " Después de configurar el secret, reinicia el webhook:"
-echo "   sudo systemctl restart portfolio-webhook"
+echo "[4/4] Instalando regla sudoers (reinicio sin contraseña)..."
+
+SYSTEMCTL_BIN="$(command -v systemctl)"
+SUDOERS_DST="/etc/sudoers.d/portfolio-tracker"
+TMP_SUDOERS="$(mktemp)"
+
+sed \
+    -e "s|__USER__|$CURRENT_USER|g" \
+    -e "s|__SYSTEMCTL__|$SYSTEMCTL_BIN|g" \
+    "$SCRIPT_DIR/sudoers-portfolio.template" > "$TMP_SUDOERS"
+
+if sudo visudo -cf "$TMP_SUDOERS" >/dev/null 2>&1; then
+    sudo install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_DST"
+    echo "   ✔ Instalado $SUDOERS_DST"
+else
+    echo "   ✘ La regla sudoers no validó; NO instalada. Revisa la plantilla."
+fi
+rm -f "$TMP_SUDOERS"
 echo ""
 
 # ---------------------------------------------------------------------------

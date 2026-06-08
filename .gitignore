@@ -3,3 +3,7 @@ backend/data/*.db
 __pycache__
 data/
 src/__pycache__/
+
+# Deploy: secretos y ficheros generados (nunca versionar el secreto del webhook)
+deploy/webhook.env
+deploy/hooks.json

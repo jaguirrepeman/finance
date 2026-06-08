@@ -12,6 +12,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# El secreto vive fuera de git (webhook.env). El '-' hace opcional el fichero
+# para que el fallo, si falta, lo dé render_hooks.sh con un mensaje claro.
+EnvironmentFile=-__PROJECT_DIR__/deploy/webhook.env
+# Regenera hooks.json (git-ignorado) con el secreto real ANTES de arrancar.
+# Así sobrevive a `git reset --hard` de update.sh: se reconstruye en cada start.
+ExecStartPre=__PROJECT_DIR__/deploy/render_hooks.sh
 ExecStart=/usr/bin/webhook -hooks __PROJECT_DIR__/deploy/hooks.json -port 9000 -verbose
 WorkingDirectory=__PROJECT_DIR__
 User=__USER__

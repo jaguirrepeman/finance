@@ -1,0 +1,16 @@
+# =============================================================================
+# sudoers-portfolio.template — Permite reiniciar el backend SIN contraseña
+#
+# install_service.sh procesa esta plantilla sustituyendo:
+#   __USER__        →  usuario que ejecuta los servicios
+#   __SYSTEMCTL__   →  ruta absoluta a systemctl
+# y la instala (validada con `visudo -cf`) en:
+#   /etc/sudoers.d/portfolio-tracker   (modo 0440)
+#
+# Necesario porque update.sh (paso 4), disparado por el webhook sin TTY, hace
+# `sudo systemctl restart portfolio-tracker`. Sin esta regla el deploy descarga
+# el código pero NO reinicia el backend, y seguirías viendo la versión vieja.
+#
+# El alcance es mínimo a propósito: SOLO reiniciar este servicio concreto.
+# =============================================================================
+__USER__ ALL=(root) NOPASSWD: __SYSTEMCTL__ restart portfolio-tracker, __SYSTEMCTL__ restart portfolio-tracker.service
