@@ -51,11 +51,37 @@
   }
 }
 
+/* ─── Transiciones "de app" entre pestañas (solo en dispositivos táctiles) ──── */
+/* En escritorio (puntero fino) NO se aplica ninguna animación: misma base de
+   código, comportamiento idéntico al actual. */
+@media (pointer: coarse) {
+  @keyframes pageFromRight {
+    from { opacity: 0; transform: translateX(24px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes pageFromLeft {
+    from { opacity: 0; transform: translateX(-24px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  .page-from-right { animation: pageFromRight 0.22s ease-out; }
+  .page-from-left { animation: pageFromLeft 0.22s ease-out; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-from-right,
+  .page-from-left {
+    animation: none;
+  }
+}
+
 /* ─── Base Styles ─────────────────────────────────────────────────────────── */
 body {
   background-color: var(--color-bg-dark);
   color: var(--color-text-primary);
   font-family: var(--font-sans);
+  /* Evita el pull-to-refresh nativo del navegador (usamos el propio) y el
+     rubber-band horizontal que interferiría con el swipe entre pestañas. */
+  overscroll-behavior-y: contain;
   background-image: radial-gradient(
       circle at 15% 50%,
       hsla(280, 80%, 60%, 0.08) 0%,
