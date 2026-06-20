@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { RefreshCw, Upload } from "lucide-react";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { UploadOrdersModal } from "./upload-orders-modal";
+import { InstallAppButton } from "./install-app-button";
 import { MobileNav } from "./mobile-nav";
 import { TABS, TAB_PATHS } from "./nav-tabs";
 import { useAppGestures } from "@/hooks/use-app-gestures";
@@ -129,6 +130,7 @@ export function DashboardLayout() {
           Portfolio Tracker
         </h1>
         <div className="flex items-center gap-2 sm:gap-3">
+          <InstallAppButton />
           <button
             onClick={() => setIsUploadModalOpen(true)}
             aria-label="Subir fichero"
