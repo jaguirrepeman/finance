@@ -97,24 +97,24 @@ echo ""
 # =============================================================================
 echo "[4/4] Reiniciando el backend..."
 
-# Comprobación temprana: el reinicio necesita sudo SIN contraseña (no hay TTY
-# cuando lo dispara el webhook). install_service.sh instala la regla sudoers.
-if ! sudo -n systemctl is-active portfolio-tracker >/dev/null 2>&1 \
-     && ! sudo -n true 2>/dev/null; then
-    echo " ✘ sudo sin contraseña no disponible para reiniciar el servicio."
-    echo "   Ejecuta una vez:  bash deploy/install_service.sh"
-    echo "   (instala /etc/sudoers.d/portfolio-tracker)"
-    exit 1
-fi
-
+# El reinicio necesita sudo SIN contraseña (no hay TTY cuando lo dispara el
+# webhook). La regla sudoers (install_service.sh) solo permite EXACTAMENTE
+# `systemctl restart portfolio-tracker`, así que probamos ESE comando, no otros
+# (un `sudo -n true` fallaría porque no está en el allowlist).
 if systemctl is-active --quiet portfolio-tracker; then
-    sudo -n systemctl restart portfolio-tracker
-    sleep 2
-    if systemctl is-active --quiet portfolio-tracker; then
-        echo " ✔ portfolio-tracker reiniciado correctamente."
+    if sudo -n systemctl restart portfolio-tracker; then
+        sleep 2
+        if systemctl is-active --quiet portfolio-tracker; then
+            echo " ✔ portfolio-tracker reiniciado correctamente."
+        else
+            echo " ✘ portfolio-tracker falló al reiniciar. Ver logs:"
+            echo "   sudo journalctl -u portfolio-tracker -n 30"
+            exit 1
+        fi
     else
-        echo " ✘ portfolio-tracker falló al reiniciar. Ver logs:"
-        echo "   sudo journalctl -u portfolio-tracker -n 30"
+        echo " ✘ sudo sin contraseña no disponible para reiniciar el servicio."
+        echo "   Ejecuta una vez:  bash deploy/install_service.sh"
+        echo "   (instala /etc/sudoers.d/portfolio-tracker)"
         exit 1
     fi
 else

@@ -454,6 +454,16 @@ curl -i http://127.0.0.1:8000/api/health
      (tras editar `webhook.env`, `sudo systemctl restart portfolio-webhook`)
    - Si "200 OK" pero no se despliega: revisar `logs/deploy.log`. Si descarga pero
      no reinicia, falta la regla sudoers → `bash deploy/install_service.sh`
+   - Si "200 OK" con respuesta de 2 bytes y `deploy.log` NO cambia: el hook no
+     casa por la ruta. El Funnel monta `/hooks` → `:9000` **quitando** el prefijo
+     `/hooks`, así que el webhook debe servir en la raíz (`-urlprefix ""`, ya en
+     `portfolio-webhook.service`) y el Payload URL de GitHub debe ser
+     `…/hooks/deploy-finance`. Comprueba el mapeo real:
+     ```bash
+     # a través del Funnel: la ruta correcta debe dar 403 (firma), no 404/200
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+       https://<host>.tailnet-xxxx.ts.net/hooks/deploy-finance
+     ```
 
 ### La PWA no muestra el prompt de instalación
 

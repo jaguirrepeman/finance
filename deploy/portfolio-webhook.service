@@ -18,7 +18,11 @@ EnvironmentFile=-__PROJECT_DIR__/deploy/webhook.env
 # Regenera hooks.json (git-ignorado) con el secreto real ANTES de arrancar.
 # Así sobrevive a `git reset --hard` de update.sh: se reconstruye en cada start.
 ExecStartPre=__PROJECT_DIR__/deploy/render_hooks.sh
-ExecStart=/usr/bin/webhook -hooks __PROJECT_DIR__/deploy/hooks.json -port 9000 -verbose
+# -urlprefix "" sirve el hook en /deploy-finance (no /hooks/deploy-finance):
+# el Tailscale Funnel monta /hooks → :9000 quitando el prefijo /hooks, así que
+# GitHub apunta a https://<host>/hooks/deploy-finance y, tras el strip, llega
+# como /deploy-finance. Sin esto, el hook nunca casa y el auto-deploy no corre.
+ExecStart=/usr/bin/webhook -hooks __PROJECT_DIR__/deploy/hooks.json -urlprefix "" -port 9000 -verbose
 WorkingDirectory=__PROJECT_DIR__
 User=__USER__
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
