@@ -40,16 +40,22 @@ export default defineConfig({
       workbox: {
         runtimeCaching: [
           {
-            // Coincide por pathname: un RegExp se evalúa contra el href completo
-            // (https://host/...) y "^/finance" nunca casaría.
+            // Datos financieros: NetworkFirst para que SIEMPRE se muestre el dato
+            // fresco de la Pi cuando hay red, y solo se sirva el caché como
+            // respaldo si la red falla o tarda demasiado (offline / Pi caída).
+            // Antes era StaleWhileRevalidate, que podía pintar cifras viejas.
+            // (Coincide por pathname: un RegExp se evalúa contra el href completo
+            // —https://host/...— y "^/finance" nunca casaría.)
             urlPattern: ({ url }) => url.pathname.startsWith("/finance/api/"),
-            handler: "StaleWhileRevalidate",
+            handler: "NetworkFirst",
             options: {
               cacheName: "api-cache",
+              networkTimeoutSeconds: 4, // si la Pi tarda >4s, cae al caché
               expiration: {
                 maxEntries: 50,
                 maxAgeSeconds: 60 * 60,
               },
+              cacheableResponse: { statuses: [0, 200] },
             },
           },
         ],
